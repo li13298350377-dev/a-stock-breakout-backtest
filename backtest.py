@@ -22,6 +22,23 @@ from config import (
 )
 from signals import add_buy_signals
 
+DIAGNOSTIC_COLUMNS = [
+    "code",
+    "name",
+    "history_rows",
+    "first_date",
+    "last_date",
+    "buy_signal_count",
+    "executed_buy_count",
+    "sell_count",
+    "skipped_high_gap_count",
+    "skipped_cash_count",
+    "skipped_position_count",
+    "total_pnl",
+    "final_cash_after_stock",
+]
+
+
 TRADE_COLUMNS = [
     "signal_date",
     "exec_date",
@@ -77,9 +94,41 @@ def sell_cash(price: float, shares: int) -> float:
     return amount - commission(amount) - amount * STAMP_TAX_RATE
 
 
-def run_backtest(stock_data: dict[str, pd.DataFrame], names: dict[str, str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _build_diagnostics(prepared: dict[str, pd.DataFrame], names: dict[str, str]) -> dict[str, dict]:
+    """初始化每只股票的诊断计数。"""
+    diagnostics: dict[str, dict] = {}
+    for code, df in prepared.items():
+        first_date = df["日期"].iloc[0] if not df.empty else None
+        last_date = df["日期"].iloc[-1] if not df.empty else None
+        skipped_high_gap = df.get("buy_signal_before_gap", pd.Series(dtype=bool)) & ~df.get(
+            "buy_signal", pd.Series(dtype=bool)
+        )
+        diagnostics[code] = {
+            "code": code,
+            "name": names.get(code, ""),
+            "history_rows": len(df),
+            "first_date": first_date,
+            "last_date": last_date,
+            "buy_signal_count": int(
+                df.get("buy_signal_before_gap", pd.Series(dtype=bool)).sum()
+            ),
+            "executed_buy_count": 0,
+            "sell_count": 0,
+            "skipped_high_gap_count": int(skipped_high_gap.sum()),
+            "skipped_cash_count": 0,
+            "skipped_position_count": 0,
+            "total_pnl": 0.0,
+            "final_cash_after_stock": None,
+        }
+    return diagnostics
+
+
+def run_backtest(
+    stock_data: dict[str, pd.DataFrame], names: dict[str, str]
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """运行回测：每天最多持有一只股票，按信号次日开盘交易。"""
     prepared = {code: add_buy_signals(df) for code, df in stock_data.items() if not df.empty}
+    diagnostics = _build_diagnostics(prepared, names)
     all_dates = sorted({d for df in prepared.values() for d in df["日期"].tolist()})
     rows = {code: df.set_index("日期") for code, df in prepared.items()}
 
@@ -137,7 +186,18 @@ def run_backtest(stock_data: dict[str, pd.DataFrame], names: dict[str, str]) -> 
                         "reason": reason,
                     }
                 )
+                diagnostics[position.code]["sell_count"] += 1
+                diagnostics[position.code]["total_pnl"] += pnl
+                diagnostics[position.code]["final_cash_after_stock"] = round(cash, 2)
                 position = None
+
+        if position is not None:
+            for code, df_by_date in rows.items():
+                has_signal = current_date in df_by_date.index and bool(
+                    df_by_date.loc[current_date].get("buy_signal", False)
+                )
+                if has_signal:
+                    diagnostics[code]["skipped_position_count"] += 1
 
         # 空仓且未触发连续亏损暂停时，按当日信号选择成交额最高标的，次日开盘买入。
         if position is None and consecutive_losses < MAX_CONSECUTIVE_LOSSES:
@@ -179,10 +239,24 @@ def run_backtest(stock_data: dict[str, pd.DataFrame], names: dict[str, str]) -> 
                             "reason": "强势突破，次日开盘买入",
                         }
                     )
+                    diagnostics[code]["executed_buy_count"] += 1
+                    diagnostics[code]["final_cash_after_stock"] = round(cash, 2)
+                else:
+                    diagnostics[code]["skipped_cash_count"] += 1
 
         market_value = 0.0
         if position and current_date in rows[position.code].index:
             market_value = float(rows[position.code].loc[current_date]["收盘"]) * position.shares
-        equity_rows.append({"date": current_date, "cash": round(cash, 2), "market_value": round(market_value, 2), "equity": round(cash + market_value, 2)})
+        equity_rows.append(
+            {
+                "date": current_date,
+                "cash": round(cash, 2),
+                "market_value": round(market_value, 2),
+                "equity": round(cash + market_value, 2),
+            }
+        )
 
-    return pd.DataFrame(trades, columns=TRADE_COLUMNS), pd.DataFrame(equity_rows)
+    diagnostics_df = pd.DataFrame(diagnostics.values(), columns=DIAGNOSTIC_COLUMNS)
+    if not diagnostics_df.empty:
+        diagnostics_df["total_pnl"] = diagnostics_df["total_pnl"].round(2)
+    return pd.DataFrame(trades, columns=TRADE_COLUMNS), pd.DataFrame(equity_rows), diagnostics_df

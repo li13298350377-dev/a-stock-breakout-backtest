@@ -56,7 +56,7 @@ def add_buy_signals(df: pd.DataFrame) -> pd.DataFrame:
     data = prepare_history(df)
     if data.empty:
         return data
-    data["buy_signal"] = (
+    data["buy_signal_before_gap"] = (
         (data["收盘"] > data["high_60_prev"])
         & (data["成交额"] > data["avg_amount_20"] * VOLUME_MULTIPLIER)
         & (data["涨跌幅"].between(MIN_DAILY_PCT, MAX_DAILY_PCT))
@@ -65,7 +65,9 @@ def add_buy_signals(df: pd.DataFrame) -> pd.DataFrame:
         & (data["收盘"] > data["ma5"])
         & (data["ma5"] > data["ma10"])
         & (data["ma10"] > data["ma20"])
-        & (data["next_open_gap"] <= MAX_NEXT_OPEN_GAP)
         & data["next_open"].notna()
+    )
+    data["buy_signal"] = data["buy_signal_before_gap"] & (
+        data["next_open_gap"] <= MAX_NEXT_OPEN_GAP
     )
     return data
