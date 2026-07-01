@@ -6,7 +6,7 @@ from datetime import datetime
 import pandas as pd
 
 from backtest import run_backtest
-from config import INITIAL_CASH, RESULTS_DIR, START_DATE, END_DATE, TOP_N_BY_AMOUNT
+from config import FALLBACK_SYMBOLS, INITIAL_CASH, RESULTS_DIR, START_DATE, END_DATE, TOP_N_BY_AMOUNT
 from data_loader import build_candidate_universe, ensure_dirs, load_realtime_quotes, load_stock_history
 from metrics import summarize_performance
 from signals import passes_history_filters, prepare_history
@@ -18,11 +18,16 @@ def main() -> None:
     RESULTS_DIR.mkdir(exist_ok=True)
 
     print("[INFO] 拉取/读取 A 股实时行情...")
-    quotes = load_realtime_quotes()
-    universe = build_candidate_universe(quotes, TOP_N_BY_AMOUNT)
+    try:
+        quotes = load_realtime_quotes()
+        universe = build_candidate_universe(quotes, TOP_N_BY_AMOUNT)
+    except Exception as exc:
+        print(f"[WARN] 实时行情接口失败：{exc}")
+        universe = pd.DataFrame()
+
     if universe.empty:
-        print("[WARN] 股票池为空，程序结束。")
-        return
+        print("[WARN] 实时股票池失败，使用固定测试股票列表继续回测。")
+        universe = pd.DataFrame({"代码": FALLBACK_SYMBOLS, "名称": FALLBACK_SYMBOLS})
 
     stock_data: dict[str, pd.DataFrame] = {}
     names: dict[str, str] = {}
