@@ -147,9 +147,14 @@ def _build_diagnostics(prepared: dict[str, pd.DataFrame], names: dict[str, str])
 
 
 def run_backtest(
-    stock_data: dict[str, pd.DataFrame], names: dict[str, str]
+    stock_data: dict[str, pd.DataFrame],
+    names: dict[str, str],
+    pause_after_consecutive_losses: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """运行回测：每天最多持有一只股票，按信号次日开盘交易。"""
+    """运行回测：每天最多持有一只股票，按信号次日开盘交易。
+
+    pause_after_consecutive_losses 为 False 时，仅用于研究诊断，忽略连续亏损暂停买入规则。
+    """
     prepared = {code: add_buy_signals(df) for code, df in stock_data.items() if not df.empty}
     diagnostics = _build_diagnostics(prepared, names)
     all_dates = sorted({d for df in prepared.values() for d in df["日期"].tolist()})
@@ -225,7 +230,11 @@ def run_backtest(
                     position_label(),
                 )
 
-        if position is None and consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+        if (
+            pause_after_consecutive_losses
+            and position is None
+            and consecutive_losses >= MAX_CONSECUTIVE_LOSSES
+        ):
             for code, df_by_date in rows.items():
                 if current_date in df_by_date.index and bool(df_by_date.loc[current_date].get("buy_signal", False)):
                     row = df_by_date.loc[current_date]
@@ -312,7 +321,14 @@ def run_backtest(
                         )
 
         # 空仓且未触发连续亏损暂停时，按当日信号选择成交额最高标的，次日开盘买入。
-        if position is None and consecutive_losses < MAX_CONSECUTIVE_LOSSES:
+        can_open_position = (
+            position is None
+            and (
+                not pause_after_consecutive_losses
+                or consecutive_losses < MAX_CONSECUTIVE_LOSSES
+            )
+        )
+        if can_open_position:
             candidates = []
             for code, df_by_date in rows.items():
                 if current_date not in df_by_date.index:
