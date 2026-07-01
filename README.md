@@ -11,7 +11,26 @@
   - `trades.csv`：交易记录；
   - `daily_equity.csv`：每日权益；
   - `performance_summary.csv`：绩效汇总。
-- 默认只测试成交额最高的前 20 只股票，确认跑通后可在 `config.py` 调整 `TOP_N_BY_AMOUNT`。
+
+### `trades.csv` 字段说明
+
+`trades.csv` 保留逐笔交易输出，并将日期、价格、费用和收益字段拆分得更清楚：
+
+- `signal_date`：触发买入或卖出信号的日期。
+- `exec_date`：实际成交日期，即信号日后的下一个交易日开盘。
+- `code` / `name`：股票代码和名称。
+- `side`：交易方向，`BUY` 表示买入，`SELL` 表示卖出。
+- `buy_price` / `sell_price`：买入或卖出的实际成交价格，已包含滑点。
+- `shares`：成交股数。
+- `buy_value` / `sell_value`：买入或卖出的成交金额，不含佣金和税费。
+- `buy_commission` / `sell_commission`：买入或卖出佣金。
+- `stamp_tax`：卖出印花税，仅卖出记录有值。
+- `pnl`：单笔卖出后的净收益，已扣除买入佣金、卖出佣金和印花税。
+- `pnl_pct`：单笔净收益率百分比，按净收益除以买入总成本计算。
+- `cash_after_trade`：该笔交易完成后的剩余现金。
+- `reason`：触发该笔交易的原因。
+
+默认只测试成交额最高的前 20 只股票，确认跑通后可在 `config.py` 调整 `TOP_N_BY_AMOUNT`。
 
 ## 安装
 

@@ -34,6 +34,7 @@ def prepare_history(df: pd.DataFrame) -> pd.DataFrame:
     data["pct_5"] = data["收盘"] / data["收盘"].shift(5) * 100 - 100
     data["pct_20"] = data["收盘"] / data["收盘"].shift(20) * 100 - 100
     data["next_open"] = data["开盘"].shift(-1)
+    data["next_date"] = data["日期"].shift(-1)
     data["next_open_gap"] = data["next_open"] / data["收盘"] * 100 - 100
     return data
 
