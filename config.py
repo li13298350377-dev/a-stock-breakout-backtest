@@ -5,6 +5,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 DATA_CACHE_DIR = BASE_DIR / "data_cache"
 RESULTS_DIR = BASE_DIR / "results"
+RESULTS_NO_PAUSE_DIR = BASE_DIR / "results_no_pause"
 HISTORY_DIR = DATA_CACHE_DIR / "history"
 
 # 回测区间：None 表示由本地/接口数据自动决定

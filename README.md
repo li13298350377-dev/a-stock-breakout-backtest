@@ -7,10 +7,13 @@
 - 使用 AKShare 拉取 A 股实时行情和个股历史日线。
 - 所有数据缓存到 `data_cache/`，每只股票历史数据单独保存为 CSV。
 - 拉取数据失败会自动重试，最终失败后跳过，不让程序崩溃。
-- 回测结果输出到 `results/`：
+- 实盘风控模式回测结果输出到 `results/`：
   - `trades.csv`：交易记录；
   - `daily_equity.csv`：每日权益；
-  - `performance_summary.csv`：绩效汇总。
+  - `performance_summary.csv`：绩效汇总；
+  - `diagnostics.csv`：按股票汇总的诊断计数；
+  - `signal_events.csv`：逐信号处理明细。
+- 研究诊断用 no-pause 模式回测结果输出到 `results_no_pause/`，文件名与 `results/` 一致。该模式只忽略“连续亏 3 次暂停新开仓”规则，其他买入、卖出、费用、滑点和单持仓规则不变。
 
 ### `trades.csv` 字段说明
 
@@ -31,6 +34,12 @@
 - `reason`：触发该笔交易的原因。
 
 默认只测试成交额最高的前 20 只股票，确认跑通后可在 `config.py` 调整 `TOP_N_BY_AMOUNT`。
+
+### 输出目录说明
+
+- `results/`：实盘风控模式结果，保留连续亏 3 次暂停新开仓规则。
+- `results_no_pause/`：研究诊断模式结果，忽略连续亏 3 次暂停新开仓规则，用于观察暂停后信号质量。
+- `results_no_pause/` 不能用于实盘，只能用于研究诊断和信号质量观察。
 
 ## 安装
 

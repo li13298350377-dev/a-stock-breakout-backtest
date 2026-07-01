@@ -2,20 +2,68 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
 from backtest import run_backtest
-from config import FALLBACK_SYMBOLS, INITIAL_CASH, RESULTS_DIR, START_DATE, END_DATE, TOP_N_BY_AMOUNT
+from config import (
+    FALLBACK_SYMBOLS,
+    INITIAL_CASH,
+    RESULTS_DIR,
+    RESULTS_NO_PAUSE_DIR,
+    START_DATE,
+    END_DATE,
+    TOP_N_BY_AMOUNT,
+)
 from data_loader import build_candidate_universe, ensure_dirs, load_realtime_quotes, load_stock_history
 from metrics import summarize_performance
 from signals import passes_history_filters, prepare_history
+
+
+def save_backtest_outputs(
+    output_dir: Path,
+    trades: pd.DataFrame,
+    equity: pd.DataFrame,
+    summary: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+    signal_events: pd.DataFrame,
+) -> dict[str, Path]:
+    """保存一组回测输出文件。"""
+    output_dir.mkdir(exist_ok=True)
+    paths = {
+        "trades": output_dir / "trades.csv",
+        "equity": output_dir / "daily_equity.csv",
+        "summary": output_dir / "performance_summary.csv",
+        "diagnostics": output_dir / "diagnostics.csv",
+        "signal_events": output_dir / "signal_events.csv",
+    }
+    trades.to_csv(paths["trades"], index=False, encoding="utf-8-sig")
+    equity.to_csv(paths["equity"], index=False, encoding="utf-8-sig")
+    summary.to_csv(paths["summary"], index=False, encoding="utf-8-sig")
+    diagnostics.to_csv(paths["diagnostics"], index=False, encoding="utf-8-sig")
+    signal_events.to_csv(paths["signal_events"], index=False, encoding="utf-8-sig")
+    return paths
+
+
+def print_summary_compare(label: str, summary: pd.DataFrame) -> None:
+    """打印核心绩效指标。"""
+    values = summary.set_index("指标")["数值"].to_dict() if not summary.empty else {}
+    print(
+        f"[INFO] {label}："
+        f"期末权益={values.get('期末权益', 0)}，"
+        f"总收益率={values.get('总收益率', 0)}，"
+        f"最大回撤={values.get('最大回撤', 0)}，"
+        f"交易次数={values.get('交易次数', 0)}，"
+        f"胜率={values.get('胜率', 0)}"
+    )
 
 
 def main() -> None:
     """完整流程：拉行情、筛股票池、拉历史、回测、输出结果。"""
     ensure_dirs()
     RESULTS_DIR.mkdir(exist_ok=True)
+    RESULTS_NO_PAUSE_DIR.mkdir(exist_ok=True)
 
     print("[INFO] 拉取/读取 A 股实时行情...")
     try:
@@ -50,20 +98,26 @@ def main() -> None:
         print("[WARN] 没有可回测股票，程序结束。")
         return
 
-    print("[INFO] 开始回测...")
+    print("[INFO] 开始实盘风控模式回测...")
     trades, equity, diagnostics, signal_events = run_backtest(stock_data, names)
     summary = summarize_performance(equity, trades, INITIAL_CASH)
+    paths = save_backtest_outputs(RESULTS_DIR, trades, equity, summary, diagnostics, signal_events)
 
-    trades_path = RESULTS_DIR / "trades.csv"
-    equity_path = RESULTS_DIR / "daily_equity.csv"
-    summary_path = RESULTS_DIR / "performance_summary.csv"
-    diagnostics_path = RESULTS_DIR / "diagnostics.csv"
-    signal_events_path = RESULTS_DIR / "signal_events.csv"
-    trades.to_csv(trades_path, index=False, encoding="utf-8-sig")
-    equity.to_csv(equity_path, index=False, encoding="utf-8-sig")
-    summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
-    diagnostics.to_csv(diagnostics_path, index=False, encoding="utf-8-sig")
-    signal_events.to_csv(signal_events_path, index=False, encoding="utf-8-sig")
+    print("[INFO] 开始 no-pause 研究诊断模式回测...")
+    no_pause_trades, no_pause_equity, no_pause_diagnostics, no_pause_signal_events = run_backtest(
+        stock_data,
+        names,
+        pause_after_consecutive_losses=False,
+    )
+    no_pause_summary = summarize_performance(no_pause_equity, no_pause_trades, INITIAL_CASH)
+    no_pause_paths = save_backtest_outputs(
+        RESULTS_NO_PAUSE_DIR,
+        no_pause_trades,
+        no_pause_equity,
+        no_pause_summary,
+        no_pause_diagnostics,
+        no_pause_signal_events,
+    )
 
     total_buy_signals = int(diagnostics["buy_signal_count"].sum()) if not diagnostics.empty else 0
     executed_buys = int(diagnostics["executed_buy_count"].sum()) if not diagnostics.empty else 0
@@ -84,12 +138,17 @@ def main() -> None:
     print(f"[INFO] 实际买入次数：{executed_buys}")
     print(f"[INFO] 放弃买入次数：{skipped_buys}")
     print(f"[INFO] 完成卖出次数：{completed_sells}")
-    print(f"[INFO] 诊断输出：{diagnostics_path}")
-    print(f"[INFO] 信号明细：{signal_events_path}")
-    print(f"[INFO] 信号明细 action 统计：{action_counts}")
-    print(f"[INFO] 交易记录：{trades_path}")
-    print(f"[INFO] 每日权益：{equity_path}")
-    print(f"[INFO] 绩效汇总：{summary_path}")
+    print(f"[INFO] 实盘风控诊断输出：{paths['diagnostics']}")
+    print(f"[INFO] 实盘风控信号明细：{paths['signal_events']}")
+    print(f"[INFO] 实盘风控信号明细 action 统计：{action_counts}")
+    print(f"[INFO] 实盘风控交易记录：{paths['trades']}")
+    print(f"[INFO] 实盘风控每日权益：{paths['equity']}")
+    print(f"[INFO] 实盘风控绩效汇总：{paths['summary']}")
+    print(f"[INFO] no-pause 诊断交易记录：{no_pause_paths['trades']}")
+    print(f"[INFO] no-pause 诊断每日权益：{no_pause_paths['equity']}")
+    print(f"[INFO] no-pause 诊断绩效汇总：{no_pause_paths['summary']}")
+    print_summary_compare("实盘风控模式", summary)
+    print_summary_compare("no-pause 诊断模式", no_pause_summary)
     print(summary)
 
 
