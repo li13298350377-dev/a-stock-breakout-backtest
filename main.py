@@ -51,22 +51,26 @@ def main() -> None:
         return
 
     print("[INFO] 开始回测...")
-    trades, equity, diagnostics = run_backtest(stock_data, names)
+    trades, equity, diagnostics, signal_events = run_backtest(stock_data, names)
     summary = summarize_performance(equity, trades, INITIAL_CASH)
 
     trades_path = RESULTS_DIR / "trades.csv"
     equity_path = RESULTS_DIR / "daily_equity.csv"
     summary_path = RESULTS_DIR / "performance_summary.csv"
     diagnostics_path = RESULTS_DIR / "diagnostics.csv"
+    signal_events_path = RESULTS_DIR / "signal_events.csv"
     trades.to_csv(trades_path, index=False, encoding="utf-8-sig")
     equity.to_csv(equity_path, index=False, encoding="utf-8-sig")
     summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
     diagnostics.to_csv(diagnostics_path, index=False, encoding="utf-8-sig")
+    signal_events.to_csv(signal_events_path, index=False, encoding="utf-8-sig")
 
     total_buy_signals = int(diagnostics["buy_signal_count"].sum()) if not diagnostics.empty else 0
     executed_buys = int(diagnostics["executed_buy_count"].sum()) if not diagnostics.empty else 0
     skipped_buys = 0
     completed_sells = int(diagnostics["sell_count"].sum()) if not diagnostics.empty else 0
+    total_signal_events = len(signal_events)
+    action_counts = signal_events["action"].value_counts().to_dict() if not signal_events.empty else {}
     if not diagnostics.empty:
         skipped_buys = int(
             diagnostics[
@@ -76,10 +80,13 @@ def main() -> None:
 
     print(f"[INFO] 成功读取历史数据的股票数量：{len(stock_data)}")
     print(f"[INFO] 总买入信号数量：{total_buy_signals}")
+    print(f"[INFO] 总信号明细数量：{total_signal_events}")
     print(f"[INFO] 实际买入次数：{executed_buys}")
     print(f"[INFO] 放弃买入次数：{skipped_buys}")
     print(f"[INFO] 完成卖出次数：{completed_sells}")
     print(f"[INFO] 诊断输出：{diagnostics_path}")
+    print(f"[INFO] 信号明细：{signal_events_path}")
+    print(f"[INFO] 信号明细 action 统计：{action_counts}")
     print(f"[INFO] 交易记录：{trades_path}")
     print(f"[INFO] 每日权益：{equity_path}")
     print(f"[INFO] 绩效汇总：{summary_path}")
