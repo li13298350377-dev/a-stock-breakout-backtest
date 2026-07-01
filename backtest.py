@@ -22,6 +22,26 @@ from config import (
 )
 from signals import add_buy_signals
 
+TRADE_COLUMNS = [
+    "signal_date",
+    "exec_date",
+    "code",
+    "name",
+    "side",
+    "buy_price",
+    "sell_price",
+    "shares",
+    "buy_value",
+    "sell_value",
+    "buy_commission",
+    "sell_commission",
+    "stamp_tax",
+    "pnl",
+    "pnl_pct",
+    "cash_after_trade",
+    "reason",
+]
+
 
 @dataclass
 class Position:
@@ -35,16 +55,26 @@ class Position:
     max_close: float = 0.0
 
 
+def trade_value(price: float, shares: int) -> float:
+    """成交金额：成交价格 * 股数。"""
+    return price * shares
+
+
+def commission(value: float) -> float:
+    """交易佣金：按成交金额比例计算，受最低佣金约束。"""
+    return max(value * COMMISSION_RATE, MIN_COMMISSION)
+
+
 def buy_cost(price: float, shares: int) -> float:
     """买入总成本：成交金额 + 佣金。"""
-    amount = price * shares
-    return amount + max(amount * COMMISSION_RATE, MIN_COMMISSION)
+    amount = trade_value(price, shares)
+    return amount + commission(amount)
 
 
 def sell_cash(price: float, shares: int) -> float:
     """卖出到账现金：成交金额 - 佣金 - 印花税。"""
-    amount = price * shares
-    return amount - max(amount * COMMISSION_RATE, MIN_COMMISSION) - amount * STAMP_TAX_RATE
+    amount = trade_value(price, shares)
+    return amount - commission(amount) - amount * STAMP_TAX_RATE
 
 
 def run_backtest(stock_data: dict[str, pd.DataFrame], names: dict[str, str]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -80,22 +110,31 @@ def run_backtest(stock_data: dict[str, pd.DataFrame], names: dict[str, str]) -> 
 
             if reason and pd.notna(row.get("next_open")):
                 exec_price = float(row["next_open"]) * (1 - SLIPPAGE_RATE)
-                proceeds = sell_cash(exec_price, position.shares)
-                pnl = proceeds - buy_cost(position.buy_price, position.shares)
+                sell_value = trade_value(exec_price, position.shares)
+                sell_commission = commission(sell_value)
+                stamp_tax = sell_value * STAMP_TAX_RATE
+                proceeds = sell_value - sell_commission - stamp_tax
+                buy_total_cost = buy_cost(position.buy_price, position.shares)
+                pnl = proceeds - buy_total_cost
+                pnl_pct = pnl / buy_total_cost * 100
                 cash += proceeds
                 consecutive_losses = consecutive_losses + 1 if pnl < 0 else 0
                 trades.append(
                     {
-                        "date": row["日期"] if "日期" in row else current_date,
-                        "exec_date": None,
+                        "signal_date": current_date,
+                        "exec_date": row["next_date"],
                         "code": position.code,
                         "name": position.name,
                         "side": "SELL",
-                        "price": round(exec_price, 3),
+                        "sell_price": round(exec_price, 3),
                         "shares": position.shares,
-                        "reason": reason,
+                        "sell_value": round(sell_value, 2),
+                        "sell_commission": round(sell_commission, 2),
+                        "stamp_tax": round(stamp_tax, 2),
                         "pnl": round(pnl, 2),
-                        "cash": round(cash, 2),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "cash_after_trade": round(cash, 2),
+                        "reason": reason,
                     }
                 )
                 position = None
@@ -114,7 +153,9 @@ def run_backtest(stock_data: dict[str, pd.DataFrame], names: dict[str, str]) -> 
                 exec_price = float(row["next_open"]) * (1 + SLIPPAGE_RATE)
                 shares = int(cash // (exec_price * LOT_SIZE)) * LOT_SIZE
                 if shares >= LOT_SIZE and buy_cost(exec_price, shares) <= cash:
-                    cash -= buy_cost(exec_price, shares)
+                    buy_value = trade_value(exec_price, shares)
+                    buy_commission = commission(buy_value)
+                    cash -= buy_value + buy_commission
                     position = Position(
                         code=code,
                         name=names.get(code, ""),
@@ -125,16 +166,17 @@ def run_backtest(stock_data: dict[str, pd.DataFrame], names: dict[str, str]) -> 
                     )
                     trades.append(
                         {
-                            "date": current_date,
-                            "exec_date": None,
+                            "signal_date": current_date,
+                            "exec_date": row["next_date"],
                             "code": code,
                             "name": names.get(code, ""),
                             "side": "BUY",
-                            "price": round(exec_price, 3),
+                            "buy_price": round(exec_price, 3),
                             "shares": shares,
+                            "buy_value": round(buy_value, 2),
+                            "buy_commission": round(buy_commission, 2),
+                            "cash_after_trade": round(cash, 2),
                             "reason": "强势突破，次日开盘买入",
-                            "pnl": 0,
-                            "cash": round(cash, 2),
                         }
                     )
 
@@ -143,4 +185,4 @@ def run_backtest(stock_data: dict[str, pd.DataFrame], names: dict[str, str]) -> 
             market_value = float(rows[position.code].loc[current_date]["收盘"]) * position.shares
         equity_rows.append({"date": current_date, "cash": round(cash, 2), "market_value": round(market_value, 2), "equity": round(cash + market_value, 2)})
 
-    return pd.DataFrame(trades), pd.DataFrame(equity_rows)
+    return pd.DataFrame(trades, columns=TRADE_COLUMNS), pd.DataFrame(equity_rows)
