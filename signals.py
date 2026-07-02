@@ -8,6 +8,7 @@ from config import (
     MAX_20D_PCT,
     MAX_DAILY_PCT,
     MAX_NEXT_OPEN_GAP,
+    MIN_NEXT_OPEN_GAP,
     MIN_5D_PCT,
     MIN_AVG_AMOUNT_20,
     MIN_DAILY_PCT,
@@ -51,8 +52,12 @@ def passes_history_filters(df: pd.DataFrame) -> bool:
     return recent["成交额"].mean() > MIN_AVG_AMOUNT_20
 
 
-def add_buy_signals(df: pd.DataFrame) -> pd.DataFrame:
-    """生成突破买入信号；信号日次日开盘买入，高开超过 5% 放弃。"""
+def add_buy_signals(
+    df: pd.DataFrame,
+    max_next_open_gap: float = MAX_NEXT_OPEN_GAP,
+    min_next_open_gap: float | None = MIN_NEXT_OPEN_GAP,
+) -> pd.DataFrame:
+    """生成突破买入信号；信号日次日开盘买入，可按次日开盘涨跌幅过滤。"""
     data = prepare_history(df)
     if data.empty:
         return data
@@ -68,7 +73,8 @@ def add_buy_signals(df: pd.DataFrame) -> pd.DataFrame:
     )
     data["buy_signal_rule"] = signal_rule
     data["buy_signal_before_gap"] = signal_rule & data["next_open"].notna()
-    data["buy_signal"] = data["buy_signal_before_gap"] & (
-        data["next_open_gap"] <= MAX_NEXT_OPEN_GAP
-    )
+    gap_filter = data["next_open_gap"] <= max_next_open_gap
+    if min_next_open_gap is not None:
+        gap_filter &= data["next_open_gap"] >= min_next_open_gap
+    data["buy_signal"] = data["buy_signal_before_gap"] & gap_filter
     return data

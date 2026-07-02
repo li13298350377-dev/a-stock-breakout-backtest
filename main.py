@@ -6,15 +6,23 @@ from pathlib import Path
 
 import pandas as pd
 
-from backtest import run_backtest
+from backtest import BacktestRules, run_backtest
 from config import (
     FALLBACK_SYMBOLS,
     INITIAL_CASH,
     RESULTS_DIR,
     RESULTS_NO_PAUSE_DIR,
+    RESULTS_V1_1_DIR,
     START_DATE,
     END_DATE,
     TOP_N_BY_AMOUNT,
+    V1_1_MAX_HOLD_DAYS_WITHOUT_PROFIT,
+    V1_1_MAX_NEXT_OPEN_GAP,
+    V1_1_MIN_NEXT_OPEN_GAP,
+    V1_1_PROFIT_TARGET_PCT,
+    V1_1_STOP_LOSS_PCT,
+    V1_1_TRAILING_ACTIVATE_PCT,
+    V1_1_TRAILING_DRAWDOWN_PCT,
 )
 from data_loader import build_candidate_universe, ensure_dirs, load_realtime_quotes, load_stock_history
 from metrics import summarize_performance
@@ -64,6 +72,7 @@ def main() -> None:
     ensure_dirs()
     RESULTS_DIR.mkdir(exist_ok=True)
     RESULTS_NO_PAUSE_DIR.mkdir(exist_ok=True)
+    RESULTS_V1_1_DIR.mkdir(exist_ok=True)
 
     print("[INFO] 拉取/读取 A 股实时行情...")
     try:
@@ -119,6 +128,31 @@ def main() -> None:
         no_pause_signal_events,
     )
 
+    print("[INFO] 开始 v1.1 风控优化模式回测...")
+    v1_1_rules = BacktestRules(
+        max_next_open_gap=V1_1_MAX_NEXT_OPEN_GAP,
+        min_next_open_gap=V1_1_MIN_NEXT_OPEN_GAP,
+        stop_loss_pct=V1_1_STOP_LOSS_PCT,
+        max_hold_days_without_profit=V1_1_MAX_HOLD_DAYS_WITHOUT_PROFIT,
+        profit_target_pct=V1_1_PROFIT_TARGET_PCT,
+        trailing_activate_pct=V1_1_TRAILING_ACTIVATE_PCT,
+        trailing_drawdown_pct=V1_1_TRAILING_DRAWDOWN_PCT,
+    )
+    v1_1_trades, v1_1_equity, v1_1_diagnostics, v1_1_signal_events = run_backtest(
+        stock_data,
+        names,
+        rules=v1_1_rules,
+    )
+    v1_1_summary = summarize_performance(v1_1_equity, v1_1_trades, INITIAL_CASH)
+    v1_1_paths = save_backtest_outputs(
+        RESULTS_V1_1_DIR,
+        v1_1_trades,
+        v1_1_equity,
+        v1_1_summary,
+        v1_1_diagnostics,
+        v1_1_signal_events,
+    )
+
     total_buy_signals = int(diagnostics["buy_signal_count"].sum()) if not diagnostics.empty else 0
     executed_buys = int(diagnostics["executed_buy_count"].sum()) if not diagnostics.empty else 0
     skipped_buys = 0
@@ -147,8 +181,12 @@ def main() -> None:
     print(f"[INFO] no-pause 诊断交易记录：{no_pause_paths['trades']}")
     print(f"[INFO] no-pause 诊断每日权益：{no_pause_paths['equity']}")
     print(f"[INFO] no-pause 诊断绩效汇总：{no_pause_paths['summary']}")
-    print_summary_compare("实盘风控模式", summary)
-    print_summary_compare("no-pause 诊断模式", no_pause_summary)
+    print(f"[INFO] v1.1 风控优化交易记录：{v1_1_paths['trades']}")
+    print(f"[INFO] v1.1 风控优化每日权益：{v1_1_paths['equity']}")
+    print(f"[INFO] v1.1 风控优化绩效汇总：{v1_1_paths['summary']}")
+    print_summary_compare("v1 实盘风控模式 results", summary)
+    print_summary_compare("v1 no-pause 诊断模式 results_no_pause", no_pause_summary)
+    print_summary_compare("v1.1 风控优化模式 results_v1_1", v1_1_summary)
     print(summary)
 
 
