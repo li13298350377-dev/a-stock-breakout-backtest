@@ -12,7 +12,9 @@ from config import (
     MA_EXIT_WINDOW,
     MAX_CONSECUTIVE_LOSSES,
     MAX_HOLD_DAYS_WITHOUT_PROFIT,
+    MAX_NEXT_OPEN_GAP,
     MIN_COMMISSION,
+    MIN_NEXT_OPEN_GAP,
     PROFIT_TARGET_PCT,
     SLIPPAGE_RATE,
     STAMP_TAX_RATE,
@@ -40,6 +42,19 @@ DIAGNOSTIC_COLUMNS = [
     "final_cash_after_stock",
 ]
 
+
+
+
+@dataclass(frozen=True)
+class BacktestRules:
+    """可配置的买入过滤与卖出风控阈值。"""
+    max_next_open_gap: float = MAX_NEXT_OPEN_GAP
+    min_next_open_gap: float | None = MIN_NEXT_OPEN_GAP
+    stop_loss_pct: float = STOP_LOSS_PCT
+    max_hold_days_without_profit: int = MAX_HOLD_DAYS_WITHOUT_PROFIT
+    profit_target_pct: float = PROFIT_TARGET_PCT
+    trailing_activate_pct: float = TRAILING_ACTIVATE_PCT
+    trailing_drawdown_pct: float = TRAILING_DRAWDOWN_PCT
 
 SIGNAL_EVENT_COLUMNS = [
     "signal_date",
@@ -150,12 +165,22 @@ def run_backtest(
     stock_data: dict[str, pd.DataFrame],
     names: dict[str, str],
     pause_after_consecutive_losses: bool = True,
+    rules: BacktestRules | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """运行回测：每天最多持有一只股票，按信号次日开盘交易。
 
     pause_after_consecutive_losses 为 False 时，仅用于研究诊断，忽略连续亏损暂停买入规则。
     """
-    prepared = {code: add_buy_signals(df) for code, df in stock_data.items() if not df.empty}
+    rules = rules or BacktestRules()
+    prepared = {
+        code: add_buy_signals(
+            df,
+            max_next_open_gap=rules.max_next_open_gap,
+            min_next_open_gap=rules.min_next_open_gap,
+        )
+        for code, df in stock_data.items()
+        if not df.empty
+    }
     diagnostics = _build_diagnostics(prepared, names)
     all_dates = sorted({d for df in prepared.values() for d in df["日期"].tolist()})
     rows = {code: df.set_index("日期") for code, df in prepared.items()}
@@ -225,7 +250,7 @@ def run_backtest(
                     code,
                     row,
                     "SKIPPED_HIGH_GAP",
-                    "次日开盘高开超过阈值，放弃买入",
+                    "次日开盘涨跌幅超过阈值，放弃买入",
                     cash,
                     position_label(),
                 )
@@ -258,14 +283,26 @@ def run_backtest(
             drawdown_from_high = float(row["收盘"]) / position.max_close * 100 - 100
 
             reason = None
-            if pnl_pct <= STOP_LOSS_PCT:
-                reason = "亏损达到 8% 止损"
+            if pnl_pct <= rules.stop_loss_pct:
+                reason = f"亏损达到 {abs(rules.stop_loss_pct):g}% 止损"
             elif float(row["收盘"]) < float(row[f"ma{MA_EXIT_WINDOW}"]):
                 reason = "收盘跌破 10 日均线"
-            elif position.hold_days >= MAX_HOLD_DAYS_WITHOUT_PROFIT and pnl_pct <= PROFIT_TARGET_PCT:
-                reason = "5 个交易日未盈利超过 8%"
-            elif pnl_pct >= TRAILING_ACTIVATE_PCT and drawdown_from_high <= -TRAILING_DRAWDOWN_PCT:
-                reason = "盈利超过 20% 后回撤 10%"
+            elif (
+                position.hold_days >= rules.max_hold_days_without_profit
+                and pnl_pct <= rules.profit_target_pct
+            ):
+                reason = (
+                    f"{rules.max_hold_days_without_profit} 个交易日"
+                    f"未盈利超过 {rules.profit_target_pct:g}%"
+                )
+            elif (
+                pnl_pct >= rules.trailing_activate_pct
+                and drawdown_from_high <= -rules.trailing_drawdown_pct
+            ):
+                reason = (
+                    f"盈利超过 {rules.trailing_activate_pct:g}% 后"
+                    f"回撤 {rules.trailing_drawdown_pct:g}%"
+                )
 
             if reason and pd.notna(row.get("next_open")):
                 exec_price = float(row["next_open"]) * (1 - SLIPPAGE_RATE)
