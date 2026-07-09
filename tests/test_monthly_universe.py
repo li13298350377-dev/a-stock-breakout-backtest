@@ -16,6 +16,7 @@ from market_snapshot_provider import (
 from monthly_universe import (
     add_history_metrics,
     build_base_universe,
+    print_probe,
     resolve_month_dates_from_calendar,
     run_full,
 )
@@ -173,6 +174,21 @@ class MonthlyUniverseTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 run_full(FakeProvider(fail=True))
             diagnostics = pd.read_csv(Path(tmp) / "results" / "data_diagnostics.csv")
+            self.assertIn("failed_trade_dates", diagnostics.columns)
+            self.assertIn("messages", diagnostics.columns)
+            self.assertIn("download failed", diagnostics.loc[0, "messages"])
+
+    def test_probe_failure_saves_diagnostics(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2022-06-01", periods=180))
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("monthly_universe.get_trade_dates", return_value=cal), \
+                patch("monthly_universe.RESULT_DIR", Path(tmp) / "results"), \
+                patch("monthly_universe.MARKET_DAILY_CACHE_DIR", Path(tmp) / "daily"), \
+                patch("monthly_universe.MARKET_SNAPSHOT_CACHE_DIR", Path(tmp) / "snapshot"):
+            with self.assertRaises(RuntimeError):
+                print_probe(FakeProvider(fail=True))
+            diagnostics = pd.read_csv(Path(tmp) / "results" / "data_diagnostics.csv")
+            self.assertEqual(diagnostics.loc[0, "mode"], "probe")
             self.assertIn("failed_trade_dates", diagnostics.columns)
             self.assertIn("messages", diagnostics.columns)
             self.assertIn("download failed", diagnostics.loc[0, "messages"])

@@ -181,11 +181,34 @@ def print_probe(provider: TushareBatchProvider) -> None:
     diagnostics = CacheDiagnostics(provider.name)
     print(f"screen_date: {yyyymmdd(screen_date)}")
     print(f"effective_date: {yyyymmdd(effective_date)}")
-    for date in history_dates:
-        df = load_cached_or_fetch_market_daily(provider, date, MARKET_DAILY_CACHE_DIR, diagnostics)
-        _print_probe_frame(provider.name, date, "daily", df)
-    snapshot = load_cached_or_fetch_market_snapshot(provider, yyyymmdd(screen_date), MARKET_SNAPSHOT_CACHE_DIR, diagnostics)
-    _print_probe_frame(provider.name, yyyymmdd(screen_date), "snapshot", snapshot)
+    try:
+        for date in history_dates:
+            df = load_cached_or_fetch_market_daily(provider, date, MARKET_DAILY_CACHE_DIR, diagnostics)
+            _print_probe_frame(provider.name, date, "daily", df)
+        snapshot = load_cached_or_fetch_market_snapshot(provider, yyyymmdd(screen_date), MARKET_SNAPSHOT_CACHE_DIR, diagnostics)
+        _print_probe_frame(provider.name, yyyymmdd(screen_date), "snapshot", snapshot)
+        save_diagnostics(
+            diagnostics,
+            screen_date=yyyymmdd(screen_date),
+            effective_date=yyyymmdd(effective_date),
+            mode="probe",
+            probe_daily_dates=",".join(history_dates),
+            probe_snapshot_date=yyyymmdd(screen_date),
+            snapshot_rows=len(snapshot),
+            snapshot_unique_codes=snapshot["code"].nunique() if "code" in snapshot else 0,
+        )
+    except Exception:
+        save_diagnostics(
+            diagnostics,
+            screen_date=yyyymmdd(screen_date),
+            effective_date=yyyymmdd(effective_date),
+            mode="probe",
+            probe_daily_dates=",".join(history_dates),
+            probe_snapshot_date=yyyymmdd(screen_date),
+            snapshot_rows=0,
+            snapshot_unique_codes=0,
+        )
+        raise
 
 
 def run_full(provider: TushareBatchProvider) -> None:
