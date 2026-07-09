@@ -50,7 +50,7 @@
 
 新增 `monthly_universe.py` 作为独立研究入口，用于生成历史月度动态股票池原型。当前第一阶段只生成 2023 年 1 月股票池：数据从 `20220701` 开始加载用于指标预热，研究从 `20230101` 开始，程序会自动识别 2023 年 1 月第一个实际交易日，并只使用该交易日前一个实际交易日及以前的数据做筛选和人气评分。
 
-该模块不运行任何交易策略，不做 A1 回测，不代表任何实盘结论；输出目录为 `monthly_universe_results/2023_01/`，包含 `base_universe.csv`、`popularity_ranking.csv` 和 `monthly_pool.csv`。
+该模块不运行任何交易策略，不做 A1 回测，不代表任何实盘结论；会合并当前上市清单与历史退市清单以降低幸存者偏差，并使用独立历史行情缓存目录 `data_cache/monthly_universe_history/`，避免误用原回测历史缓存中覆盖区间不足的数据。输出目录为 `monthly_universe_results/2023_01/`，包含 `base_universe.csv`、`popularity_ranking.csv` 和 `monthly_pool.csv`。
 
 运行方式：
 
