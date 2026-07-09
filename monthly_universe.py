@@ -7,11 +7,12 @@ import pandas as pd
 
 from config import BASE_DIR, MAIN_BOARD_PREFIXES, MAX_MARKET_CAP, MAX_PRICE, MIN_AVG_AMOUNT_20, MIN_LISTING_DAYS, MIN_MARKET_CAP, MIN_PRICE
 from data_loader import retry_call
-from market_snapshot_provider import CacheDiagnostics, TushareBatchProvider, load_cached_or_fetch_market_daily, load_many_market_daily
+from market_snapshot_provider import CacheDiagnostics, TushareBatchProvider, load_cached_or_fetch_market_daily, load_cached_or_fetch_market_snapshot, load_many_market_daily
 
 TARGET_MONTH = "2023-01"
 RESULT_DIR = BASE_DIR / "monthly_universe_results" / "2023_01"
 MARKET_DAILY_CACHE_DIR = BASE_DIR / "data_cache" / "market_daily"
+MARKET_SNAPSHOT_CACHE_DIR = BASE_DIR / "data_cache" / "market_snapshot"
 LOOKBACK_TRADING_DAYS = 140
 
 
@@ -147,26 +148,44 @@ def diagnostics_frame(diagnostics: CacheDiagnostics, **extra: object) -> pd.Data
         "failed_trade_dates": ",".join(diagnostics.failed_trade_dates),
         "cache_hit_dates": ",".join(diagnostics.cache_hit_dates),
         "downloaded_dates": ",".join(diagnostics.downloaded_dates),
+        "messages": " | ".join(diagnostics.messages),
     }
     row.update(extra)
     return pd.DataFrame([row])
 
 
+def save_diagnostics(diagnostics: CacheDiagnostics, **extra: object) -> None:
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    diagnostics_frame(diagnostics, **extra).to_csv(RESULT_DIR / "data_diagnostics.csv", index=False, encoding="utf-8-sig")
+
+
+def _print_probe_frame(provider_name: str, trade_date: str, data_type: str, df: pd.DataFrame) -> None:
+    print(f"数据源: {provider_name}")
+    print(f"日期: {trade_date}")
+    print(f"数据类型: {data_type}")
+    print(f"行数: {len(df)}")
+    print(f"code去重数: {df['code'].nunique()}")
+    print(f"字段列表: {list(df.columns)}")
+    print(df.head(5).to_string(index=False))
+    if data_type == "snapshot":
+        counts = df.get("historical_st_status", pd.Series(dtype=object)).value_counts(dropna=False)
+        print(f"历史ST状态 ST数量: {int(counts.get('ST', 0))}")
+        print(f"历史ST状态 NON_ST数量: {int(counts.get('NON_ST', 0))}")
+        print(f"历史ST状态 UNKNOWN数量: {int(counts.get('UNKNOWN', 0))}")
+
+
 def print_probe(provider: TushareBatchProvider) -> None:
     trade_dates = get_trade_dates()
     screen_date, effective_date = resolve_month_dates_from_calendar(trade_dates)
-    dates = required_history_dates(trade_dates, screen_date, 2)
+    history_dates = required_history_dates(trade_dates, screen_date, 2)[:-1]
     diagnostics = CacheDiagnostics(provider.name)
     print(f"screen_date: {yyyymmdd(screen_date)}")
     print(f"effective_date: {yyyymmdd(effective_date)}")
-    for date in dates:
-        df = load_cached_or_fetch_market_daily(provider, date, MARKET_DAILY_CACHE_DIR, diagnostics, require_snapshot=(date == yyyymmdd(screen_date)))
-        print(f"数据源: {provider.name}")
-        print(f"日期: {date}")
-        print(f"行数: {len(df)}")
-        print(f"code去重数量: {df['code'].nunique()}")
-        print(f"字段列表: {list(df.columns)}")
-        print(df.head(5).to_string(index=False))
+    for date in history_dates:
+        df = load_cached_or_fetch_market_daily(provider, date, MARKET_DAILY_CACHE_DIR, diagnostics)
+        _print_probe_frame(provider.name, date, "daily", df)
+    snapshot = load_cached_or_fetch_market_snapshot(provider, yyyymmdd(screen_date), MARKET_SNAPSHOT_CACHE_DIR, diagnostics)
+    _print_probe_frame(provider.name, yyyymmdd(screen_date), "snapshot", snapshot)
 
 
 def run_full(provider: TushareBatchProvider) -> None:
@@ -174,26 +193,40 @@ def run_full(provider: TushareBatchProvider) -> None:
     screen_date, effective_date = resolve_month_dates_from_calendar(trade_dates)
     needed_dates = required_history_dates(trade_dates, screen_date)
     diagnostics = CacheDiagnostics(provider.name)
-    long_df = load_many_market_daily(provider, needed_dates, MARKET_DAILY_CACHE_DIR, diagnostics)
-    snapshot = long_df[long_df["trade_date"].astype(str) == yyyymmdd(screen_date)].copy()
-    metrics = add_history_metrics(long_df, screen_date)
-    base = build_base_universe(snapshot, metrics, screen_date, effective_date)
-    ranking = build_popularity_ranking(base, metrics)
-    pool = ranking.head(50).copy()
+    base = ranking = pool = pd.DataFrame()
+    snapshot = pd.DataFrame()
+    try:
+        long_df = load_many_market_daily(provider, needed_dates, MARKET_DAILY_CACHE_DIR, diagnostics)
+        snapshot = load_cached_or_fetch_market_snapshot(provider, yyyymmdd(screen_date), MARKET_SNAPSHOT_CACHE_DIR, diagnostics)
+        metrics = add_history_metrics(long_df, screen_date)
+        base = build_base_universe(snapshot, metrics, screen_date, effective_date)
+        ranking = build_popularity_ranking(base, metrics)
+        pool = ranking.head(50).copy()
 
-    RESULT_DIR.mkdir(parents=True, exist_ok=True)
-    base.to_csv(RESULT_DIR / "base_universe.csv", index=False, encoding="utf-8-sig")
-    ranking.to_csv(RESULT_DIR / "popularity_ranking.csv", index=False, encoding="utf-8-sig")
-    pool.to_csv(RESULT_DIR / "monthly_pool.csv", index=False, encoding="utf-8-sig")
-    diagnostics_frame(
-        diagnostics,
-        screen_date=yyyymmdd(screen_date),
-        effective_date=yyyymmdd(effective_date),
-        snapshot_rows=len(snapshot),
-        snapshot_unique_codes=snapshot["code"].nunique(),
-        base_passed=int(base["passed"].sum()),
-        final_pool_count=len(pool),
-    ).to_csv(RESULT_DIR / "data_diagnostics.csv", index=False, encoding="utf-8-sig")
+        RESULT_DIR.mkdir(parents=True, exist_ok=True)
+        base.to_csv(RESULT_DIR / "base_universe.csv", index=False, encoding="utf-8-sig")
+        ranking.to_csv(RESULT_DIR / "popularity_ranking.csv", index=False, encoding="utf-8-sig")
+        pool.to_csv(RESULT_DIR / "monthly_pool.csv", index=False, encoding="utf-8-sig")
+        save_diagnostics(
+            diagnostics,
+            screen_date=yyyymmdd(screen_date),
+            effective_date=yyyymmdd(effective_date),
+            snapshot_rows=len(snapshot),
+            snapshot_unique_codes=snapshot["code"].nunique() if "code" in snapshot else 0,
+            base_passed=int(base["passed"].sum()) if not base.empty else 0,
+            final_pool_count=len(pool),
+        )
+    except Exception:
+        save_diagnostics(
+            diagnostics,
+            screen_date=yyyymmdd(screen_date),
+            effective_date=yyyymmdd(effective_date),
+            snapshot_rows=len(snapshot),
+            snapshot_unique_codes=snapshot["code"].nunique() if "code" in snapshot else 0,
+            base_passed=int(base["passed"].sum()) if not base.empty and "passed" in base else 0,
+            final_pool_count=len(pool),
+        )
+        raise
 
     print(f"目标月份: {TARGET_MONTH}")
     print(f"screen_date: {yyyymmdd(screen_date)}")
@@ -211,7 +244,6 @@ def run_full(provider: TushareBatchProvider) -> None:
     print("Top 10:")
     cols = ["rank", "code", "name", "historical_market_cap", "avg_amount_20", "heat_ratio", "active_days_20", "abnormal_attention_count_20", "popularity_score"]
     print("无" if pool.empty else pool[cols].head(10).to_string(index=False))
-
 
 def main() -> None:
     parser = argparse.ArgumentParser()

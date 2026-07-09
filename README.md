@@ -50,7 +50,7 @@
 
 新增 `monthly_universe.py` 作为独立研究入口，用于生成历史月度动态股票池原型。当前第一阶段只生成 2023 年 1 月股票池，自动识别 2023 年 1 月第一个实际交易日作为 `screen_date`，并将下一个实际交易日作为 `effective_date`。筛选与 Popularity Score v1 只使用 `screen_date` 收盘及以前的数据，不运行任何交易策略，不做 A1 回测。
 
-月度股票池已改为批量数据架构：`market_snapshot_provider.py` 按交易日获取历史全市场截面，缓存到 `data_cache/market_daily/YYYYMMDD.csv`，再从本地日期缓存合并成长表计算基础池与人气指标。该入口不会在全市场初筛前循环几千只股票调用个股历史行情接口；如果批量数据源不可用，会明确失败。
+月度股票池已改为批量数据架构：`market_snapshot_provider.py` 对普通历史交易日只按日期获取全市场 daily 数据并缓存到 `data_cache/market_daily/YYYYMMDD.csv`；仅对 `screen_date` 获取带名称、ST 状态和总市值的 snapshot，并缓存到 `data_cache/market_snapshot/YYYYMMDD.csv`。程序再从本地日期缓存合并成长表计算基础池与人气指标。该入口不会在全市场初筛前循环几千只股票调用个股历史行情接口；如果批量数据源不可用，会明确失败并写入 diagnostics。
 
 默认批量数据源为 Tushare Pro，需要环境变量 `TUSHARE_TOKEN`：
 

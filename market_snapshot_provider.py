@@ -1,6 +1,6 @@
 """Batch, trade-date based market data provider for historical monthly universes.
 
-This module intentionally exposes only all-market-by-date interfaces.  It must
+This module intentionally exposes only all-market-by-date interfaces. It must
 not fall back to per-symbol historical requests because that architecture is not
 viable for full-market monthly screening.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import os
-from typing import Iterable
+from typing import Callable, Iterable
 
 import pandas as pd
 
@@ -45,15 +45,18 @@ class MarketSnapshotProvider:
     def fetch_market_daily(self, trade_date: str) -> pd.DataFrame:
         raise NotImplementedError
 
+    def fetch_market_snapshot(self, trade_date: str) -> pd.DataFrame:
+        raise NotImplementedError
+
     def load_market_daily(self, trade_date: str) -> pd.DataFrame:
         return self.fetch_market_daily(trade_date)
 
     def load_market_snapshot(self, trade_date: str) -> pd.DataFrame:
-        return self.fetch_market_daily(trade_date)
+        return self.fetch_market_snapshot(trade_date)
 
 
 class TushareBatchProvider(MarketSnapshotProvider):
-    """Tushare Pro implementation using daily/daily_basic/namechange by date."""
+    """Tushare Pro implementation using daily for history and daily_basic only for screen snapshots."""
 
     name = "tushare_pro_batch"
 
@@ -68,47 +71,71 @@ class TushareBatchProvider(MarketSnapshotProvider):
 
         ts.set_token(token)
         self.pro = ts.pro_api()
+        self._name_cache: dict[str, pd.DataFrame] = {}
 
     @staticmethod
     def _code_from_ts_code(ts_code: str) -> str:
         return str(ts_code).split(".", 1)[0].zfill(6)
 
     def fetch_market_daily(self, trade_date: str) -> pd.DataFrame:
+        """Fetch ordinary all-market daily bars by trade date.
+
+        This intentionally calls only pro.daily. It must not request daily_basic
+        or namechange for historical lookback dates.
+        """
+        date = normalize_trade_date(trade_date)
+        daily = self.pro.daily(trade_date=date)
+        if daily is None or daily.empty:
+            raise RuntimeError(f"Tushare daily 在 {date} 未返回全市场数据。")
+        return self._normalize_daily(daily, date)
+
+    def fetch_market_snapshot(self, trade_date: str) -> pd.DataFrame:
+        """Fetch screen-date all-market snapshot with market cap and historical ST status."""
         date = normalize_trade_date(trade_date)
         daily = self.pro.daily(trade_date=date)
         basic = self.pro.daily_basic(
             trade_date=date,
             fields="ts_code,trade_date,total_mv,circ_mv,turnover_rate,volume_ratio",
         )
-        names = self.pro.namechange(
-            start_date="19900101",
-            end_date=date,
-            fields="ts_code,name,start_date,end_date,change_reason",
-        )
-
         if daily is None or daily.empty:
             raise RuntimeError(f"Tushare daily 在 {date} 未返回全市场数据。")
         if basic is None or basic.empty:
             raise RuntimeError(f"Tushare daily_basic 在 {date} 未返回全市场市值数据。")
 
-        df = daily.merge(basic[["ts_code", "total_mv"]], on="ts_code", how="left")
-        df["code"] = df["ts_code"].map(self._code_from_ts_code)
-        df["trade_date"] = date
-        # Tushare amount is 千元; daily_basic total_mv is 万元. Normalize both to 元.
-        df["amount"] = pd.to_numeric(df["amount"], errors="coerce") * 1000
+        df = self._normalize_daily(daily, date)
+        df = df.merge(basic[["ts_code", "total_mv"]], on="ts_code", how="left")
         df["total_market_cap"] = pd.to_numeric(df["total_mv"], errors="coerce") * 10000
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
-        df["pct_chg"] = pd.to_numeric(df["pct_chg"], errors="coerce")
-
-        latest_names = self._names_as_of(names, date)
-        df = df.merge(latest_names, on="ts_code", how="left")
+        names = self._names_as_of_screen_date(date)
+        df = df.merge(names, on="ts_code", how="left")
+        df["historical_st_status"] = df["name"].map(classify_historical_st_status)
         df["name"] = df["name"].fillna("")
-        df["historical_st_status"] = df["name"].str.contains("ST", case=False, na=False).map({True: "ST", False: "NON_ST"})
-        df["st_status_source"] = "TUSHARE_NAMECHANGE_AS_OF_SCREEN_DATE"
+        df["st_status_source"] = df["historical_st_status"].map(
+            lambda status: "UNKNOWN" if status == "UNKNOWN" else "TUSHARE_NAMECHANGE_AS_OF_SCREEN_DATE"
+        )
         return df[[
             "trade_date", "code", "name", "close", "pct_chg", "amount",
             "total_market_cap", "historical_st_status", "st_status_source",
         ]]
+
+    def _normalize_daily(self, daily: pd.DataFrame, date: str) -> pd.DataFrame:
+        df = daily.copy()
+        df["code"] = df["ts_code"].map(self._code_from_ts_code)
+        df["trade_date"] = date
+        # Tushare daily amount is 千元; normalize to 元.
+        df["amount"] = pd.to_numeric(df["amount"], errors="coerce") * 1000
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df["pct_chg"] = pd.to_numeric(df["pct_chg"], errors="coerce")
+        return df[["ts_code", "trade_date", "code", "close", "pct_chg", "amount"]]
+
+    def _names_as_of_screen_date(self, date: str) -> pd.DataFrame:
+        if date not in self._name_cache:
+            names = self.pro.namechange(
+                start_date="19900101",
+                end_date=date,
+                fields="ts_code,name,start_date,end_date,change_reason",
+            )
+            self._name_cache[date] = self._names_as_of(names, date)
+        return self._name_cache[date].copy()
 
     @staticmethod
     def _names_as_of(names: pd.DataFrame, date: str) -> pd.DataFrame:
@@ -121,6 +148,12 @@ class TushareBatchProvider(MarketSnapshotProvider):
         active = data[(data["start_date"].isna() | (data["start_date"] <= cutoff)) & (data["end_date"].isna() | (data["end_date"] >= cutoff))]
         active = active.sort_values(["ts_code", "start_date"]).drop_duplicates("ts_code", keep="last")
         return active[["ts_code", "name"]]
+
+
+def classify_historical_st_status(name: object) -> str:
+    if pd.isna(name) or str(name).strip() == "":
+        return "UNKNOWN"
+    return "ST" if "ST" in str(name).upper() else "NON_ST"
 
 
 def normalize_trade_date(trade_date: str | pd.Timestamp) -> str:
@@ -152,7 +185,15 @@ def validate_market_daily(df: pd.DataFrame, trade_date: str, *, require_snapshot
             raise ValueError(f"{date} 字段 {col} 无有效数值。")
 
 
-def load_cached_or_fetch_market_daily(provider: MarketSnapshotProvider, trade_date: str, cache_dir: Path, diagnostics: CacheDiagnostics, *, require_snapshot: bool = False, min_unique_codes: int = MIN_REASONABLE_UNIQUE_CODES) -> pd.DataFrame:
+def _load_cached_or_fetch(
+    fetcher: Callable[[str], pd.DataFrame],
+    trade_date: str,
+    cache_dir: Path,
+    diagnostics: CacheDiagnostics,
+    *,
+    require_snapshot: bool,
+    min_unique_codes: int,
+) -> pd.DataFrame:
     date = normalize_trade_date(trade_date)
     diagnostics.requested_trade_dates.append(date)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -165,16 +206,38 @@ def load_cached_or_fetch_market_daily(provider: MarketSnapshotProvider, trade_da
             diagnostics.successful_trade_dates.append(date)
             return cached
 
-        df = provider.load_market_daily(date)
+        df = fetcher(date)
         validate_market_daily(df, date, require_snapshot=require_snapshot, min_unique_codes=min_unique_codes)
         df.to_csv(path, index=False, encoding="utf-8-sig")
         diagnostics.downloaded_dates.append(date)
         diagnostics.successful_trade_dates.append(date)
         return pd.read_csv(path, dtype={"code": str, "trade_date": str})
-    except Exception as exc:  # diagnostics must record failed dates before re-raising
+    except Exception as exc:
         diagnostics.failed_trade_dates.append(date)
         diagnostics.messages.append(f"{date}: {exc}")
         raise
+
+
+def load_cached_or_fetch_market_daily(provider: MarketSnapshotProvider, trade_date: str, cache_dir: Path, diagnostics: CacheDiagnostics, *, min_unique_codes: int = MIN_REASONABLE_UNIQUE_CODES) -> pd.DataFrame:
+    return _load_cached_or_fetch(
+        provider.load_market_daily,
+        trade_date,
+        cache_dir,
+        diagnostics,
+        require_snapshot=False,
+        min_unique_codes=min_unique_codes,
+    )
+
+
+def load_cached_or_fetch_market_snapshot(provider: MarketSnapshotProvider, trade_date: str, cache_dir: Path, diagnostics: CacheDiagnostics, *, min_unique_codes: int = MIN_REASONABLE_UNIQUE_CODES) -> pd.DataFrame:
+    return _load_cached_or_fetch(
+        provider.load_market_snapshot,
+        trade_date,
+        cache_dir,
+        diagnostics,
+        require_snapshot=True,
+        min_unique_codes=min_unique_codes,
+    )
 
 
 def load_many_market_daily(provider: MarketSnapshotProvider, trade_dates: Iterable[str], cache_dir: Path, diagnostics: CacheDiagnostics, *, min_unique_codes: int = MIN_REASONABLE_UNIQUE_CODES) -> pd.DataFrame:
