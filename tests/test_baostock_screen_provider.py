@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import pandas as pd
@@ -9,10 +10,28 @@ from baostock_screen_provider import (
     FETCH_DATA_UNKNOWN,
     FETCH_REQUEST_FAILED_RETRYABLE,
     FETCH_SUCCESS,
+    BaoStockScreenProvider,
     load_or_fetch_enrichment,
     normalize_st_status,
     select_latest_published_total_share,
 )
+
+
+class FakeResultSet:
+    error_code = "0"
+    fields = ["code"]
+
+    def __init__(self):
+        self._used = False
+
+    def next(self):
+        if self._used:
+            return False
+        self._used = True
+        return True
+
+    def get_row_data(self):
+        return ["sh.600000"]
 
 
 class FakeBaoProvider:
@@ -51,6 +70,27 @@ class UnknownBaoProvider(FakeBaoProvider):
 
 
 class BaoStockScreenProviderTests(unittest.TestCase):
+    def test_call_sleeps_after_successful_baostock_request(self):
+        provider = BaoStockScreenProvider(retry=2, request_interval=0.01)
+        with patch("baostock_screen_provider.time.sleep") as sleep_mock:
+            df = provider._call(lambda: FakeResultSet())
+        self.assertEqual(df.loc[0, "code"], "sh.600000")
+        sleep_mock.assert_called_once_with(0.01)
+
+    def test_call_sleeps_for_failed_attempt_and_success_attempt(self):
+        provider = BaoStockScreenProvider(retry=2, request_interval=0.01)
+        calls = {"count": 0}
+
+        def flaky():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("temporary")
+            return FakeResultSet()
+
+        with patch("baostock_screen_provider.time.sleep") as sleep_mock:
+            provider._call(flaky)
+        self.assertEqual(sleep_mock.call_count, 2)
+
     def test_future_pubdate_not_used_and_latest_before_screen_selected(self):
         records = pd.DataFrame({
             "pubDate": ["2023-02-01", "2022-10-29", "2022-08-01"],

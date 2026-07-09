@@ -226,12 +226,18 @@ def print_probe(provider: TushareBatchProvider) -> None:
             _print_probe_frame(provider.name, date, "daily", df)
         fixed = ["600237", "002559", "002962", "000751", "600520"]
         enriched = load_or_fetch_enrichment(fixed, yyyymmdd(screen_date), BAOSTOCK_ENRICHMENT_CACHE_DIR, diagnostics=bdiag)
+        if bdiag.name_map_failed:
+            print("BaoStock名称映射失败，使用 CODE_FALLBACK，不影响固定5只股票 ST/totalShare probe。")
+        else:
+            print(f"BaoStock名称映射行数: {bdiag.name_map_rows}")
+            print(f"BaoStock名称映射code去重数: {bdiag.name_map_unique_codes}")
+            print(f"BaoStock名称非空数量: {bdiag.name_map_non_empty_names}")
         print("BaoStock固定5只链路汇总:")
         print(enriched[["code", "total_share", "share_pub_date", "share_stat_date", "historical_st_status"]].to_string(index=False))
-        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="probe", data_source_daily=provider.name, data_source_enrichment="baostock", probe_daily_dates=",".join(history_dates), baostock_requested_count=bdiag.requested_count, baostock_cache_hit_count=bdiag.cache_hit_count, baostock_success_count=bdiag.success_count, baostock_failed_count=bdiag.failed_count, messages=" | ".join(diagnostics.messages + bdiag.messages))
+        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="probe", data_source_daily=provider.name, data_source_enrichment="baostock", probe_daily_dates=",".join(history_dates), baostock_requested_count=bdiag.requested_count, baostock_cache_hit_count=bdiag.cache_hit_count, baostock_success_count=bdiag.success_count, baostock_failed_count=bdiag.failed_count, name_map_rows=bdiag.name_map_rows, name_map_unique_codes=bdiag.name_map_unique_codes, name_map_non_empty_names=bdiag.name_map_non_empty_names, messages=" | ".join(diagnostics.messages + bdiag.messages))
     except Exception as exc:
         diagnostics.messages.append(str(exc))
-        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="probe", data_source_daily=provider.name, data_source_enrichment="baostock", probe_daily_dates=",".join(history_dates), baostock_requested_count=bdiag.requested_count, baostock_cache_hit_count=bdiag.cache_hit_count, baostock_success_count=bdiag.success_count, baostock_failed_count=bdiag.failed_count, messages=" | ".join(diagnostics.messages + bdiag.messages))
+        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="probe", data_source_daily=provider.name, data_source_enrichment="baostock", probe_daily_dates=",".join(history_dates), baostock_requested_count=bdiag.requested_count, baostock_cache_hit_count=bdiag.cache_hit_count, baostock_success_count=bdiag.success_count, baostock_failed_count=bdiag.failed_count, name_map_rows=bdiag.name_map_rows, name_map_unique_codes=bdiag.name_map_unique_codes, name_map_non_empty_names=bdiag.name_map_non_empty_names, messages=" | ".join(diagnostics.messages + bdiag.messages))
         raise
 
 def _diag_counts(base: pd.DataFrame, prefilter: pd.DataFrame, enrich: pd.DataFrame, bdiag: BaoStockDiagnostics) -> dict:

@@ -1,3 +1,4 @@
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -262,6 +263,67 @@ class MonthlyUniverseTests(unittest.TestCase):
 
         self.assertEqual(daily_dates, ["20221229", "20221230"])
         self.assertEqual(baostock_codes, ["600237", "002559", "002962", "000751", "600520"])
+
+    def test_probe_prints_name_map_stats_and_fallback_message(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2022-06-01", "2023-01-05"))
+        provider = FakeProvider(daily_df=pd.DataFrame({
+            "trade_date": ["20221229"],
+            "code": ["000001"],
+            "close": [10],
+            "pct_chg": [0],
+            "amount": [1],
+        }))
+
+        def fake_daily(provider_arg, trade_date, cache_dir, diagnostics, **kwargs):
+            return pd.DataFrame({"trade_date": [trade_date], "code": ["000001"], "close": [10], "pct_chg": [0], "amount": [1]})
+
+        def fake_enrichment(codes, screen_date, cache_dir, provider=None, diagnostics=None):
+            diagnostics.name_map_rows = 3
+            diagnostics.name_map_unique_codes = 2
+            diagnostics.name_map_non_empty_names = 1
+            return pd.DataFrame({"code": codes, "total_share": [1] * len(codes), "share_pub_date": ["2022-10-29"] * len(codes), "share_stat_date": ["2022-09-30"] * len(codes), "historical_st_status": ["NON_ST"] * len(codes)})
+
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("monthly_universe.get_trade_dates", return_value=cal), \
+                patch("monthly_universe.RESULT_DIR", Path(tmp) / "results"), \
+                patch("monthly_universe.MARKET_DAILY_CACHE_DIR", Path(tmp) / "daily"), \
+                patch("monthly_universe.BAOSTOCK_ENRICHMENT_CACHE_DIR", Path(tmp) / "baostock"), \
+                patch("monthly_universe.required_history_dates", return_value=["20221229", "20221230", "20230102"]), \
+                patch("monthly_universe.load_cached_or_fetch_market_daily", side_effect=fake_daily), \
+                patch("monthly_universe.load_or_fetch_enrichment", side_effect=fake_enrichment), \
+                patch("sys.stdout", out):
+            print_probe(provider)
+
+        text = out.getvalue()
+        self.assertIn("BaoStock名称映射行数: 3", text)
+        self.assertIn("BaoStock名称映射code去重数: 2", text)
+        self.assertIn("BaoStock名称非空数量: 1", text)
+
+    def test_probe_prints_name_map_fallback_when_mapping_fails(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2022-06-01", "2023-01-05"))
+        provider = FakeProvider(daily_df=pd.DataFrame({"trade_date": ["20221229"], "code": ["000001"], "close": [10], "pct_chg": [0], "amount": [1]}))
+
+        def fake_daily(provider_arg, trade_date, cache_dir, diagnostics, **kwargs):
+            return pd.DataFrame({"trade_date": [trade_date], "code": ["000001"], "close": [10], "pct_chg": [0], "amount": [1]})
+
+        def fake_enrichment(codes, screen_date, cache_dir, provider=None, diagnostics=None):
+            diagnostics.name_map_failed = True
+            return pd.DataFrame({"code": codes, "total_share": [1] * len(codes), "share_pub_date": ["2022-10-29"] * len(codes), "share_stat_date": ["2022-09-30"] * len(codes), "historical_st_status": ["NON_ST"] * len(codes)})
+
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("monthly_universe.get_trade_dates", return_value=cal), \
+                patch("monthly_universe.RESULT_DIR", Path(tmp) / "results"), \
+                patch("monthly_universe.MARKET_DAILY_CACHE_DIR", Path(tmp) / "daily"), \
+                patch("monthly_universe.BAOSTOCK_ENRICHMENT_CACHE_DIR", Path(tmp) / "baostock"), \
+                patch("monthly_universe.required_history_dates", return_value=["20221229", "20221230", "20230102"]), \
+                patch("monthly_universe.load_cached_or_fetch_market_daily", side_effect=fake_daily), \
+                patch("monthly_universe.load_or_fetch_enrichment", side_effect=fake_enrichment), \
+                patch("sys.stdout", out):
+            print_probe(provider)
+
+        self.assertIn("BaoStock名称映射失败，使用 CODE_FALLBACK", out.getvalue())
 
     def test_download_failure_saves_diagnostics(self):
         cal = pd.DatetimeIndex(pd.bdate_range("2022-06-01", periods=180))

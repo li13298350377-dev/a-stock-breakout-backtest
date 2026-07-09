@@ -23,6 +23,10 @@ class BaoStockDiagnostics:
     cache_hit_count: int = 0
     success_count: int = 0
     failed_count: int = 0
+    name_map_rows: int = 0
+    name_map_unique_codes: int = 0
+    name_map_non_empty_names: int = 0
+    name_map_failed: bool = False
     messages: list[str] = field(default_factory=list)
 
 
@@ -105,7 +109,9 @@ class BaoStockScreenProvider:
             try:
                 rs = func(*args, **kwargs)
                 if getattr(rs, "error_code", "0") == "0":
-                    return self._rs_to_df(rs)
+                    result = self._rs_to_df(rs)
+                    time.sleep(self.request_interval)
+                    return result
                 last = RuntimeError(getattr(rs, "error_msg", "BaoStock error"))
             except Exception as exc:
                 last = exc
@@ -176,8 +182,12 @@ def load_or_fetch_enrichment(candidates: Iterable[str], screen_date: str, cache_
     try:
         try:
             name_map_df = ctx.fetch_name_map(screen_date)
+            diagnostics.name_map_rows = len(name_map_df)
+            diagnostics.name_map_unique_codes = int(name_map_df["code"].nunique()) if "code" in name_map_df else 0
+            diagnostics.name_map_non_empty_names = int(name_map_df.get("name", pd.Series(dtype=object)).astype(str).str.strip().ne("").sum()) if "name" in name_map_df else 0
             name_map = dict(zip(name_map_df.get("code", []), name_map_df.get("name", [])))
         except Exception as exc:
+            diagnostics.name_map_failed = True
             diagnostics.messages.append(f"name_map: {exc}")
             name_map = {}
         for code in todo:
