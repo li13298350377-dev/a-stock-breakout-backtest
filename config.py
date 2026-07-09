@@ -7,6 +7,7 @@ DATA_CACHE_DIR = BASE_DIR / "data_cache"
 RESULTS_DIR = BASE_DIR / "results"
 RESULTS_NO_PAUSE_DIR = BASE_DIR / "results_no_pause"
 RESULTS_V1_1_DIR = BASE_DIR / "results_v1_1"
+RESULTS_V1_1_NO_PAUSE_DIR = BASE_DIR / "results_v1_1_no_pause"
 HISTORY_DIR = DATA_CACHE_DIR / "history"
 
 # 回测区间：None 表示由本地/接口数据自动决定
