@@ -48,15 +48,29 @@
 
 ## 历史月度动态股票池原型
 
-新增 `monthly_universe.py` 作为独立研究入口，用于生成历史月度动态股票池原型。当前第一阶段只生成 2023 年 1 月股票池：数据从 `20220701` 开始加载用于指标预热，研究从 `20230101` 开始，程序会自动识别 2023 年 1 月第一个实际交易日，并只使用该交易日前一个实际交易日及以前的数据做筛选和人气评分。
+新增 `monthly_universe.py` 作为独立研究入口，用于生成历史月度动态股票池原型。当前第一阶段只生成 2023 年 1 月股票池，自动识别 2023 年 1 月第一个实际交易日作为 `screen_date`，并将下一个实际交易日作为 `effective_date`。筛选与 Popularity Score v1 只使用 `screen_date` 收盘及以前的数据，不运行任何交易策略，不做 A1 回测。
 
-该模块不运行任何交易策略，不做 A1 回测，不代表任何实盘结论；会合并当前上市清单与历史退市清单以降低幸存者偏差，并使用独立历史行情缓存目录 `data_cache/monthly_universe_history/`，避免误用原回测历史缓存中覆盖区间不足的数据。输出目录为 `monthly_universe_results/2023_01/`，包含 `base_universe.csv`、`popularity_ranking.csv` 和 `monthly_pool.csv`。
+月度股票池已改为批量数据架构：`market_snapshot_provider.py` 按交易日获取历史全市场截面，缓存到 `data_cache/market_daily/YYYYMMDD.csv`，再从本地日期缓存合并成长表计算基础池与人气指标。该入口不会在全市场初筛前循环几千只股票调用个股历史行情接口；如果批量数据源不可用，会明确失败。
 
-运行方式：
+默认批量数据源为 Tushare Pro，需要环境变量 `TUSHARE_TOKEN`：
+
+```bash
+export TUSHARE_TOKEN=你的TushareToken
+```
+
+请勿把 token 写入代码或日志。首次运行完整构建前建议先执行快速探测：
+
+```bash
+python monthly_universe.py --probe
+```
+
+探测成功后再运行完整构建：
 
 ```bash
 python monthly_universe.py
 ```
+
+输出目录为 `monthly_universe_results/2023_01/`，包含 `base_universe.csv`、`popularity_ranking.csv`、`monthly_pool.csv` 和 `data_diagnostics.csv`。
 
 ## 安装
 
