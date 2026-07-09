@@ -6,6 +6,9 @@ import pandas as pd
 
 from baostock_screen_provider import (
     BaoStockDiagnostics,
+    FETCH_DATA_UNKNOWN,
+    FETCH_REQUEST_FAILED_RETRYABLE,
+    FETCH_SUCCESS,
     load_or_fetch_enrichment,
     normalize_st_status,
     select_latest_published_total_share,
@@ -20,6 +23,31 @@ class FakeBaoProvider:
     def fetch_one(self, code, screen_date, name_map=None):
         self.calls.append(code)
         return {"code": code, "name": name_map.get(code, code), "name_source": "BAOSTOCK_QUERY_ALL_STOCK" if code in name_map else "CODE_FALLBACK", "historical_st_status": "NON_ST", "st_status_source": "BAOSTOCK_ISST_SCREEN_DATE", "share_pub_date": "2022-10-29", "share_stat_date": "2022-09-30", "total_share": 100.0, "share_source": "BAOSTOCK_QUERY_PROFIT_DATA"}
+
+
+class FlakyBaoProvider:
+    def __init__(self):
+        self.calls = []
+        self.fail_once = {"000002"}
+    def fetch_name_map(self, screen_date):
+        return pd.DataFrame(columns=["code", "name"])
+    def fetch_one(self, code, screen_date, name_map=None):
+        self.calls.append(code)
+        if code in self.fail_once:
+            self.fail_once.remove(code)
+            raise RuntimeError("temporary network")
+        return {"code": code, "name": code, "name_source": "CODE_FALLBACK", "historical_st_status": "NON_ST", "st_status_source": "BAOSTOCK_ISST_SCREEN_DATE", "share_pub_date": "2022-10-29", "share_stat_date": "2022-09-30", "total_share": 100.0, "share_source": "BAOSTOCK_QUERY_PROFIT_DATA", "fetch_status": FETCH_SUCCESS}
+
+
+class NameMapFailProvider(FakeBaoProvider):
+    def fetch_name_map(self, screen_date):
+        raise RuntimeError("name service down")
+
+
+class UnknownBaoProvider(FakeBaoProvider):
+    def fetch_one(self, code, screen_date, name_map=None):
+        self.calls.append(code)
+        return {"code": code, "name": code, "name_source": "CODE_FALLBACK", "historical_st_status": "UNKNOWN", "st_status_source": "UNKNOWN", "share_pub_date": "", "share_stat_date": "", "total_share": float("nan"), "share_source": "TOTAL_SHARE_UNKNOWN", "fetch_status": FETCH_DATA_UNKNOWN}
 
 
 class BaoStockScreenProviderTests(unittest.TestCase):
@@ -53,6 +81,42 @@ class BaoStockScreenProviderTests(unittest.TestCase):
             self.assertEqual(fake.calls, ["000002"])
             self.assertEqual(diag.cache_hit_count, 1)
             self.assertEqual(len(df), 2)
+
+    def test_request_failed_retryable_retried_but_success_cache_not_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            fake = FlakyBaoProvider()
+            first = BaoStockDiagnostics()
+            load_or_fetch_enrichment(["000001", "000002"], "20230103", cache, provider=fake, diagnostics=first)
+            self.assertEqual(fake.calls, ["000001", "000002"])
+            self.assertEqual(first.failed_count, 1)
+            cached = pd.read_csv(cache / "20230103.csv", dtype={"code": str})
+            self.assertEqual(cached.loc[cached["code"] == "000002", "fetch_status"].iloc[0], FETCH_REQUEST_FAILED_RETRYABLE)
+
+            second = BaoStockDiagnostics()
+            load_or_fetch_enrichment(["000001", "000002"], "20230103", cache, provider=fake, diagnostics=second)
+            self.assertEqual(fake.calls, ["000001", "000002", "000002"])
+            self.assertEqual(second.cache_hit_count, 1)
+
+    def test_data_unknown_cache_is_completed_and_not_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            fake = UnknownBaoProvider()
+            load_or_fetch_enrichment(["000003"], "20230103", cache, provider=fake, diagnostics=BaoStockDiagnostics())
+            load_or_fetch_enrichment(["000003"], "20230103", cache, provider=fake, diagnostics=BaoStockDiagnostics())
+            self.assertEqual(fake.calls, ["000003"])
+            cached = pd.read_csv(cache / "20230103.csv", dtype={"code": str})
+            self.assertEqual(cached.loc[0, "fetch_status"], FETCH_DATA_UNKNOWN)
+
+    def test_name_map_failure_falls_back_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = NameMapFailProvider()
+            diag = BaoStockDiagnostics()
+            df = load_or_fetch_enrichment(["000001"], "20230103", Path(tmp), provider=fake, diagnostics=diag)
+            self.assertEqual(fake.calls, ["000001"])
+            self.assertEqual(df.loc[df["code"] == "000001", "name_source"].iloc[0], "CODE_FALLBACK")
+            self.assertEqual(df.loc[df["code"] == "000001", "historical_st_status"].iloc[0], "NON_ST")
+            self.assertIn("name_map", diag.messages[0])
 
 if __name__ == "__main__":
     unittest.main()

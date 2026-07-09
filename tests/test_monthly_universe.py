@@ -75,6 +75,33 @@ def make_provider(pro):
     return provider
 
 
+class FullFlowProvider:
+    name = "full_flow_fake"
+
+    def __init__(self):
+        self.daily_calls = []
+        self.daily_basic_calls = 0
+        self.stk_premarket_calls = 0
+
+    def load_market_daily(self, trade_date):
+        self.daily_calls.append(trade_date)
+        rows = [
+            {"trade_date": trade_date, "code": "000001", "close": 10, "pct_chg": 0, "amount": 60_000_000},
+            {"trade_date": trade_date, "code": "000002", "close": 50, "pct_chg": 0, "amount": 60_000_000},
+        ]
+        for i in range(1000):
+            rows.append({"trade_date": trade_date, "code": f"300{i:03d}", "close": 10, "pct_chg": 0, "amount": 60_000_000})
+        return pd.DataFrame(rows)
+
+    def daily_basic(self, *args, **kwargs):
+        self.daily_basic_calls += 1
+        raise AssertionError("daily_basic must not be called")
+
+    def stk_premarket(self, *args, **kwargs):
+        self.stk_premarket_calls += 1
+        raise AssertionError("stk_premarket must not be called")
+
+
 class MonthlyUniverseTests(unittest.TestCase):
     def test_month_dates(self):
         cal = pd.DatetimeIndex(pd.to_datetime(["2022-12-30", "2023-01-03", "2023-01-04"]))
@@ -167,6 +194,74 @@ class MonthlyUniverseTests(unittest.TestCase):
         metrics = add_history_metrics(hist, dates[-1])
         pre = build_prefilter_candidates(screen_daily_rows(hist, dates[-1]), metrics)
         self.assertEqual(pre["code"].tolist(), ["000001"])
+
+    def test_run_full_does_not_call_paid_tushare_and_enriches_only_prefilter_codes(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2022-06-01", "2023-01-05"))
+        provider = FullFlowProvider()
+        captured = {}
+
+        def fake_enrichment(codes, screen_date, cache_dir, provider=None, diagnostics=None):
+            captured["codes"] = list(codes)
+            diagnostics.messages.append("000009: simulated baostock detail")
+            return pd.DataFrame({
+                "code": codes,
+                "name": codes,
+                "name_source": ["CODE_FALLBACK"] * len(codes),
+                "historical_st_status": ["NON_ST"] * len(codes),
+                "st_status_source": ["BAOSTOCK_ISST_SCREEN_DATE"] * len(codes),
+                "share_pub_date": ["2022-10-29"] * len(codes),
+                "share_stat_date": ["2022-09-30"] * len(codes),
+                "total_share": [300_000_000] * len(codes),
+                "share_source": ["BAOSTOCK_QUERY_PROFIT_DATA"] * len(codes),
+                "fetch_status": ["SUCCESS"] * len(codes),
+            })
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("monthly_universe.get_trade_dates", return_value=cal), \
+                patch("monthly_universe.RESULT_DIR", Path(tmp) / "results"), \
+                patch("monthly_universe.MARKET_DAILY_CACHE_DIR", Path(tmp) / "daily"), \
+                patch("monthly_universe.BAOSTOCK_ENRICHMENT_CACHE_DIR", Path(tmp) / "baostock"), \
+                patch("monthly_universe.load_or_fetch_enrichment", side_effect=fake_enrichment):
+            run_full(provider)
+            diagnostics = pd.read_csv(Path(tmp) / "results" / "data_diagnostics.csv")
+
+        self.assertEqual(provider.daily_basic_calls, 0)
+        self.assertEqual(provider.stk_premarket_calls, 0)
+        self.assertEqual(captured["codes"], ["000001"])
+        self.assertIn("simulated baostock detail", diagnostics.loc[0, "messages"])
+
+    def test_probe_requests_exact_daily_dates_and_fixed_baostock_codes(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2022-06-01", "2023-01-05"))
+        provider = FakeProvider(daily_df=pd.DataFrame({
+            "trade_date": ["20221229"],
+            "code": ["000001"],
+            "close": [10],
+            "pct_chg": [0],
+            "amount": [1],
+        }))
+        daily_dates = []
+        baostock_codes = []
+
+        def fake_daily(provider_arg, trade_date, cache_dir, diagnostics, **kwargs):
+            daily_dates.append(trade_date)
+            return pd.DataFrame({"trade_date": [trade_date], "code": ["000001"], "close": [10], "pct_chg": [0], "amount": [1]})
+
+        def fake_enrichment(codes, screen_date, cache_dir, provider=None, diagnostics=None):
+            baostock_codes.extend(codes)
+            return pd.DataFrame({"code": codes, "total_share": [1] * len(codes), "share_pub_date": ["2022-10-29"] * len(codes), "share_stat_date": ["2022-09-30"] * len(codes), "historical_st_status": ["NON_ST"] * len(codes)})
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("monthly_universe.get_trade_dates", return_value=cal), \
+                patch("monthly_universe.RESULT_DIR", Path(tmp) / "results"), \
+                patch("monthly_universe.MARKET_DAILY_CACHE_DIR", Path(tmp) / "daily"), \
+                patch("monthly_universe.BAOSTOCK_ENRICHMENT_CACHE_DIR", Path(tmp) / "baostock"), \
+                patch("monthly_universe.required_history_dates", return_value=["20221229", "20221230", "20230102"]), \
+                patch("monthly_universe.load_cached_or_fetch_market_daily", side_effect=fake_daily), \
+                patch("monthly_universe.load_or_fetch_enrichment", side_effect=fake_enrichment):
+            print_probe(provider)
+
+        self.assertEqual(daily_dates, ["20221229", "20221230"])
+        self.assertEqual(baostock_codes, ["600237", "002559", "002962", "000751", "600520"])
 
     def test_download_failure_saves_diagnostics(self):
         cal = pd.DatetimeIndex(pd.bdate_range("2022-06-01", periods=180))

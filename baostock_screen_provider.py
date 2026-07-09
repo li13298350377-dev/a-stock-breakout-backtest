@@ -12,6 +12,9 @@ SHARE_SOURCE = "BAOSTOCK_QUERY_PROFIT_DATA"
 SHARE_UNKNOWN = "TOTAL_SHARE_UNKNOWN"
 ST_SOURCE = "BAOSTOCK_ISST_SCREEN_DATE"
 MARKET_CAP_METHOD = "CLOSE_X_LATEST_PUBLISHED_QUARTER_TOTAL_SHARE"
+FETCH_SUCCESS = "SUCCESS"
+FETCH_DATA_UNKNOWN = "DATA_UNKNOWN"
+FETCH_REQUEST_FAILED_RETRYABLE = "REQUEST_FAILED_RETRYABLE"
 
 
 @dataclass
@@ -132,6 +135,7 @@ class BaoStockScreenProvider:
             rows.append(self._call(self.bs.query_profit_data, code=bs_code, year=y, quarter=q))
         share = select_latest_published_total_share(pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(), screen_date)
         name = (name_map or {}).get(str(code).zfill(6), "")
+        fetch_status = FETCH_SUCCESS if pd.notna(share.get("total_share")) else FETCH_DATA_UNKNOWN
         return {
             "code": str(code).zfill(6),
             "name": name or str(code).zfill(6),
@@ -139,6 +143,7 @@ class BaoStockScreenProvider:
             "historical_st_status": st,
             "st_status_source": ST_SOURCE if st != "UNKNOWN" else "UNKNOWN",
             **share,
+            "fetch_status": fetch_status,
         }
 
 
@@ -146,31 +151,48 @@ def load_or_fetch_enrichment(candidates: Iterable[str], screen_date: str, cache_
     diagnostics = diagnostics or BaoStockDiagnostics()
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / f"{pd.to_datetime(screen_date).strftime('%Y%m%d')}.csv"
-    cols = ["code","name","name_source","historical_st_status","st_status_source","share_pub_date","share_stat_date","total_share","share_source"]
+    cols = ["code", "name", "name_source", "historical_st_status", "st_status_source", "share_pub_date", "share_stat_date", "total_share", "share_source", "fetch_status"]
     existing = pd.read_csv(path, dtype={"code": str}) if path.exists() else pd.DataFrame(columns=cols)
     existing["code"] = existing.get("code", pd.Series(dtype=str)).astype(str).str.zfill(6)
+    if "fetch_status" not in existing.columns:
+        completed = (existing.get("share_source", pd.Series(dtype=object)) == SHARE_SOURCE) | (existing.get("st_status_source", pd.Series(dtype=object)) == ST_SOURCE)
+        existing["fetch_status"] = completed.map(lambda ok: FETCH_SUCCESS if ok else FETCH_REQUEST_FAILED_RETRYABLE)
+    for col in cols:
+        if col not in existing.columns:
+            existing[col] = "" if col != "total_share" else float("nan")
     wanted = [str(c).zfill(6) for c in candidates]
-    done = set(existing["code"])
+    completed_statuses = {FETCH_SUCCESS, FETCH_DATA_UNKNOWN}
+    done_rows = existing[existing["fetch_status"].isin(completed_statuses)]
+    done = set(done_rows["code"])
     diagnostics.cache_hit_count += sum(1 for c in wanted if c in done)
     todo = [c for c in wanted if c not in done]
     diagnostics.requested_count += len(todo)
     rows = []
+    if not todo:
+        return existing[existing["code"].isin(wanted)][cols]
     own = provider is None
     provider = provider or BaoStockScreenProvider()
     ctx = provider if not own else provider.__enter__()
     try:
-        name_map_df = ctx.fetch_name_map(screen_date)
-        name_map = dict(zip(name_map_df.get("code", []), name_map_df.get("name", [])))
+        try:
+            name_map_df = ctx.fetch_name_map(screen_date)
+            name_map = dict(zip(name_map_df.get("code", []), name_map_df.get("name", [])))
+        except Exception as exc:
+            diagnostics.messages.append(f"name_map: {exc}")
+            name_map = {}
         for code in todo:
             try:
-                rows.append(ctx.fetch_one(code, screen_date, name_map))
+                row = ctx.fetch_one(code, screen_date, name_map)
+                row.setdefault("fetch_status", FETCH_SUCCESS if pd.notna(row.get("total_share")) else FETCH_DATA_UNKNOWN)
+                rows.append(row)
                 diagnostics.success_count += 1
             except Exception as exc:
                 diagnostics.failed_count += 1
                 diagnostics.messages.append(f"{code}: {exc}")
-                rows.append({"code": code, "name": code, "name_source": "CODE_FALLBACK", "historical_st_status": "UNKNOWN", "st_status_source": "UNKNOWN", "share_pub_date": "", "share_stat_date": "", "total_share": float("nan"), "share_source": SHARE_UNKNOWN})
-            pd.concat([existing, pd.DataFrame(rows)], ignore_index=True).drop_duplicates("code", keep="last").to_csv(path, index=False, encoding="utf-8-sig")
+                rows.append({"code": code, "name": code, "name_source": "CODE_FALLBACK", "historical_st_status": "UNKNOWN", "st_status_source": "UNKNOWN", "share_pub_date": "", "share_stat_date": "", "total_share": float("nan"), "share_source": SHARE_UNKNOWN, "fetch_status": FETCH_REQUEST_FAILED_RETRYABLE})
+            pd.concat([existing, pd.DataFrame(rows)], ignore_index=True).drop_duplicates("code", keep="last")[cols].to_csv(path, index=False, encoding="utf-8-sig")
     finally:
         if own:
             provider.__exit__(None, None, None)
-    return pd.concat([existing, pd.DataFrame(rows)], ignore_index=True).drop_duplicates("code", keep="last").query("code in @wanted")[cols]
+    combined = pd.concat([existing, pd.DataFrame(rows)], ignore_index=True).drop_duplicates("code", keep="last")
+    return combined[combined["code"].isin(wanted)][cols]

@@ -276,10 +276,10 @@ def run_full(provider: TushareBatchProvider) -> None:
         base.to_csv(RESULT_DIR / "base_universe.csv", index=False, encoding="utf-8-sig")
         ranking.to_csv(RESULT_DIR / "popularity_ranking.csv", index=False, encoding="utf-8-sig")
         pool.to_csv(RESULT_DIR / "monthly_pool.csv", index=False, encoding="utf-8-sig")
-        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="full", data_source_daily=provider.name, data_source_enrichment="baostock", final_pool_count=len(pool), **_diag_counts(base, prefilter, enrich, bdiag))
+        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="full", data_source_daily=provider.name, data_source_enrichment="baostock", final_pool_count=len(pool), messages=" | ".join(diagnostics.messages + bdiag.messages), **_diag_counts(base, prefilter, enrich, bdiag))
     except Exception as exc:
         diagnostics.messages.append(str(exc))
-        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="full", data_source_daily=provider.name, data_source_enrichment="baostock", final_pool_count=len(pool), **_diag_counts(base, prefilter, enrich, bdiag))
+        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="full", data_source_daily=provider.name, data_source_enrichment="baostock", final_pool_count=len(pool), messages=" | ".join(diagnostics.messages + bdiag.messages), **_diag_counts(base, prefilter, enrich, bdiag))
         raise
 
     print(f"目标月份: {TARGET_MONTH}")
