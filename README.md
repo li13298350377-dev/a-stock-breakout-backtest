@@ -50,7 +50,9 @@
 
 新增 `monthly_universe.py` 作为独立研究入口，用于生成历史月度动态股票池原型。当前第一阶段只生成 2023 年 1 月股票池，自动识别 2023 年 1 月第一个实际交易日作为 `screen_date`，并将下一个实际交易日作为 `effective_date`。筛选与 Popularity Score v1 只使用 `screen_date` 收盘及以前的数据，不运行任何交易策略，不做 A1 回测。
 
-月度股票池已改为批量数据架构：`market_snapshot_provider.py` 对普通历史交易日只按日期获取全市场 daily 数据并缓存到 `data_cache/market_daily/YYYYMMDD.csv`；仅对 `screen_date` 获取带名称、ST 状态和总市值的 snapshot，并缓存到 `data_cache/market_snapshot/YYYYMMDD.csv`。程序再从本地日期缓存合并成长表计算基础池与人气指标。该入口不会在全市场初筛前循环几千只股票调用个股历史行情接口；如果批量数据源不可用，会明确失败并写入 diagnostics。
+月度股票池已改为“免费批量 daily + 预筛后 BaoStock 补充”的数据架构：`market_snapshot_provider.py` 对普通历史交易日只调用 Tushare `pro.daily(trade_date=...)`，按交易日获取全市场历史日线并缓存到 `data_cache/market_daily/YYYYMMDD.csv`。程序先用 daily 数据完成主板代码、`screen_date` 收盘价、上市历史长度和 20 日平均成交额预筛，记录 `prefilter_candidate_count`；随后仅对预筛候选股调用 BaoStock 补充 `screen_date` 当日 `isST` 和当时最新已公开的 `totalShare`，缓存到 `data_cache/baostock_screen_enrichment/YYYYMMDD.csv`，支持断点续跑，已成功缓存的 code 不重复请求。
+
+历史总市值使用 `screen_date close × latest published totalShare` 估算，并输出 `share_pub_date`、`share_stat_date` 与 `market_cap_method=CLOSE_X_LATEST_PUBLISHED_QUARTER_TOTAL_SHARE`。该方法使用的是 `screen_date` 当时最近已公开季度的总股本，不是绝对精确的逐日股本快照；因此不得将其描述为逐日总股本，也不得用未来披露数据或当前总股本替代。历史 ST 判断只使用 BaoStock `screen_date` 的 `isST`，`name` 仅用于展示，名称缺失时使用 code fallback 且不会据此判定为非 ST。该入口不再在完整股票池流程中调用 `daily_basic` 或 `stk_premarket`，也不回退到 AKShare 逐股票历史行情。
 
 默认批量数据源为 Tushare Pro，需要环境变量 `TUSHARE_TOKEN`：
 
