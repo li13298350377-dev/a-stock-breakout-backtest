@@ -160,10 +160,30 @@ class BaoStockScreenProvider:
         date_dash = pd.to_datetime(screen_date).strftime("%Y-%m-%d")
         st_df = self._call(self.bs.query_history_k_data_plus, bs_code, "date,code,close,isST", start_date=date_dash, end_date=date_dash, frequency="d", adjustflag="3")
         st = normalize_st_status(st_df.iloc[0].get("isST") if not st_df.empty else None)
-        rows = []
+        # Query reporting periods from newest to oldest.
+        # Once a quarter has a valid totalShare published by screen_date,
+        # older reporting periods cannot outrank it under the point-in-time rule.
+        share = select_latest_published_total_share(
+            pd.DataFrame(),
+            screen_date,
+        )
+
         for y, q in quarter_cursor(screen_date):
-            rows.append(self._call(self.bs.query_profit_data, code=bs_code, year=y, quarter=q))
-        share = select_latest_published_total_share(pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(), screen_date)
+            quarter_df = self._call(
+                self.bs.query_profit_data,
+                code=bs_code,
+                year=y,
+                quarter=q,
+            )
+
+            candidate_share = select_latest_published_total_share(
+                quarter_df,
+                screen_date,
+            )
+
+            if pd.notna(candidate_share.get("total_share")):
+                share = candidate_share
+                break
         name = (name_map or {}).get(str(code).zfill(6), "")
         fetch_status = FETCH_SUCCESS if pd.notna(share.get("total_share")) else FETCH_DATA_UNKNOWN
         return {

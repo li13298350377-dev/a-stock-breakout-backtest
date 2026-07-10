@@ -153,6 +153,109 @@ class BaoStockScreenProviderTests(unittest.TestCase):
         self.assertEqual(out["share_source"], "TOTAL_SHARE_UNKNOWN")
         self.assertTrue(pd.isna(out["total_share"]))
 
+    def test_fetch_one_stops_at_first_published_valid_quarter(self):
+        provider = BaoStockScreenProvider()
+
+        class FakeBS:
+            def query_history_k_data_plus(self, *args, **kwargs):
+                pass
+
+            def query_profit_data(self, *args, **kwargs):
+                pass
+
+        provider.bs = FakeBS()
+
+        profit_calls = []
+
+        def fake_call(func, *args, **kwargs):
+            if func.__name__ == "query_history_k_data_plus":
+                return pd.DataFrame({
+                    "date": ["2023-01-03"],
+                    "code": ["sz.001270"],
+                    "close": ["12.00"],
+                    "isST": ["0"],
+                })
+
+            if func.__name__ == "query_profit_data":
+                year = kwargs["year"]
+                quarter = kwargs["quarter"]
+
+                profit_calls.append((year, quarter))
+
+                records = {
+                    (2023, 1): {
+                        "pubDate": "2023-04-27",
+                        "statDate": "2023-03-31",
+                        "totalShare": "111812946.00",
+                    },
+                    (2022, 4): {
+                        "pubDate": "2023-03-29",
+                        "statDate": "2022-12-31",
+                        "totalShare": "111812946.00",
+                    },
+                    (2022, 3): {
+                        "pubDate": "2022-10-29",
+                        "statDate": "2022-09-30",
+                        "totalShare": "111812946.00",
+                    },
+                }
+
+                if (year, quarter) not in records:
+                    self.fail(
+                        f"early-stop failed: unexpected older quarter "
+                        f"{year}Q{quarter} was requested"
+                    )
+
+                return pd.DataFrame([
+                    records[(year, quarter)]
+                ])
+
+            raise AssertionError(
+                f"unexpected BaoStock function: {func.__name__}"
+            )
+
+        provider._call = fake_call
+
+        result = provider.fetch_one(
+            code="001270",
+            screen_date="20230103",
+            name_map={},
+        )
+
+        self.assertEqual(
+            profit_calls,
+            [
+                (2023, 1),
+                (2022, 4),
+                (2022, 3),
+            ],
+        )
+
+        self.assertEqual(
+            result["historical_st_status"],
+            "NON_ST",
+        )
+
+        self.assertEqual(
+            result["share_pub_date"],
+            "2022-10-29",
+        )
+
+        self.assertEqual(
+            result["share_stat_date"],
+            "2022-09-30",
+        )
+
+        self.assertEqual(
+            result["total_share"],
+            111812946.0,
+        )
+
+        self.assertEqual(
+            result["fetch_status"],
+            FETCH_SUCCESS,
+        )
+
     def test_st_mapping(self):
         self.assertEqual(normalize_st_status("1"), "ST")
         self.assertEqual(normalize_st_status("0"), "NON_ST")
