@@ -143,6 +143,8 @@ class MonthlyUniverseTests(unittest.TestCase):
         snapshot = history[history.trade_date == dates[-1].strftime("%Y%m%d")].copy()
         snapshot["name"] = "平安银行"
         snapshot["close"] = 10
+        snapshot["historical_st_status"] = "NON_ST"
+        snapshot["st_status_source"] = "TEST"
         base = build_base_universe(snapshot, metrics, dates[-1], dates[-1] + pd.offsets.BDay(1))
         self.assertTrue(bool(base.iloc[0]["passed"]))
         self.assertEqual(base.iloc[0]["close"], 10)
@@ -175,6 +177,36 @@ class MonthlyUniverseTests(unittest.TestCase):
         enrich = pd.DataFrame({"code": ["600237"], "name": ["铜峰电子"], "name_source": ["BAOSTOCK_QUERY_ALL_STOCK"], "historical_st_status": ["NON_ST"], "st_status_source": ["BAOSTOCK_ISST_SCREEN_DATE"], "share_pub_date": ["2022-10-29"], "share_stat_date": ["2022-09-30"], "total_share": [564369565], "share_source": ["BAOSTOCK_QUERY_PROFIT_DATA"]})
         snap = build_enriched_snapshot(pre, enrich)
         self.assertEqual(snap.loc[0, "historical_market_cap"], 6.74 * 564369565)
+
+    def test_unknown_st_status_excludes_with_reason(self):
+        snapshot = pd.DataFrame({
+            "trade_date": ["20230103"],
+            "code": ["000001"],
+            "name": ["TEST_UNKNOWN_ST"],
+            "close": [10],
+            "total_share": [300_000_000],
+            "historical_market_cap": [3_000_000_000],
+            "listing_days": [121],
+            "avg_amount_20": [60_000_000],
+            "historical_st_status": ["UNKNOWN"],
+            "st_status_source": ["UNKNOWN"],
+        })
+
+        base = build_base_universe(
+            snapshot,
+            pd.DataFrame(),
+            pd.Timestamp("2023-01-03"),
+            pd.Timestamp("2023-01-04"),
+        )
+
+        self.assertFalse(
+            bool(base.iloc[0]["passed"])
+        )
+
+        self.assertIn(
+            "screen_date历史ST状态未知",
+            base.iloc[0]["exclude_reason"],
+        )
 
     def test_unknown_share_excludes_with_reason(self):
         snapshot = pd.DataFrame({"trade_date": ["20230103"], "code": ["000001"], "name": ["平安银行"], "close": [10], "total_share": [float("nan")], "historical_market_cap": [float("nan")], "listing_days": [121], "avg_amount_20": [60_000_000], "historical_st_status": ["NON_ST"]})

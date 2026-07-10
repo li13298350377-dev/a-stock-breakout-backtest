@@ -153,8 +153,20 @@ def build_base_universe(snapshot: pd.DataFrame, metrics: pd.DataFrame, screen_da
             item_reasons.append("截至screen_date历史不足120个交易日")
         if pd.isna(row.avg_amount_20) or row.avg_amount_20 <= MIN_AVG_AMOUNT_20:
             item_reasons.append("20日平均成交额不足5000万")
-        if getattr(row, "historical_st_status", "UNKNOWN") == "ST":
-            item_reasons.append("screen_date历史ST状态")
+        historical_st_status = getattr(
+            row,
+            "historical_st_status",
+            "UNKNOWN",
+        )
+
+        if historical_st_status == "ST":
+            item_reasons.append(
+                "screen_date历史ST状态"
+            )
+        elif historical_st_status != "NON_ST":
+            item_reasons.append(
+                "screen_date历史ST状态未知"
+            )
         reasons.append(";".join(item_reasons))
 
     screen["screen_date"] = yyyymmdd(screen_date)
