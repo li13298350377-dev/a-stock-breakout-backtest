@@ -7,12 +7,13 @@ import pandas as pd
 
 from config import BASE_DIR, MAIN_BOARD_PREFIXES, MAX_MARKET_CAP, MAX_PRICE, MIN_AVG_AMOUNT_20, MIN_LISTING_DAYS, MIN_MARKET_CAP, MIN_PRICE
 from data_loader import retry_call
-from market_snapshot_provider import CacheDiagnostics, TushareBatchProvider, load_cached_or_fetch_market_daily, load_cached_or_fetch_market_snapshot, load_many_market_daily
+from market_snapshot_provider import CacheDiagnostics, TushareBatchProvider, load_cached_or_fetch_market_daily, load_many_market_daily
+from baostock_screen_provider import BaoStockDiagnostics, MARKET_CAP_METHOD, load_or_fetch_enrichment
 
 TARGET_MONTH = "2023-01"
 RESULT_DIR = BASE_DIR / "monthly_universe_results" / "2023_01"
 MARKET_DAILY_CACHE_DIR = BASE_DIR / "data_cache" / "market_daily"
-MARKET_SNAPSHOT_CACHE_DIR = BASE_DIR / "data_cache" / "market_snapshot"
+BAOSTOCK_ENRICHMENT_CACHE_DIR = BASE_DIR / "data_cache" / "baostock_screen_enrichment"
 LOOKBACK_TRADING_DAYS = 140
 
 
@@ -92,39 +93,88 @@ def add_history_metrics(long_df: pd.DataFrame, screen_date: pd.Timestamp) -> pd.
     return pd.DataFrame(rows)
 
 
+def screen_daily_rows(long_df: pd.DataFrame, screen_date: pd.Timestamp) -> pd.DataFrame:
+    date = yyyymmdd(screen_date)
+    screen = long_df[long_df["trade_date"].astype(str) == date].copy()
+    screen["code"] = screen["code"].astype(str).str.zfill(6)
+    return screen[["trade_date", "code", "close", "pct_chg", "amount"]].drop_duplicates("code", keep="last")
+
+
+def build_prefilter_candidates(screen_daily: pd.DataFrame, metrics: pd.DataFrame) -> pd.DataFrame:
+    screen = screen_daily.copy()
+    screen["code"] = screen["code"].astype(str).str.zfill(6)
+    screen = screen[screen["code"].map(is_main_board)].merge(metrics, on="code", how="left")
+    close = pd.to_numeric(screen["close"], errors="coerce")
+    return screen[
+        close.between(MIN_PRICE, MAX_PRICE)
+        & (pd.to_numeric(screen["listing_days"], errors="coerce") >= MIN_LISTING_DAYS)
+        & (pd.to_numeric(screen["avg_amount_20"], errors="coerce") > MIN_AVG_AMOUNT_20)
+    ].copy().reset_index(drop=True)
+
+
+def build_enriched_snapshot(prefilter: pd.DataFrame, enrichment: pd.DataFrame) -> pd.DataFrame:
+    snap = prefilter.merge(enrichment, on="code", how="left")
+    snap["name"] = snap["name"].fillna(snap["code"])
+    snap["name_source"] = snap["name_source"].fillna("CODE_FALLBACK")
+    snap["historical_st_status"] = snap["historical_st_status"].fillna("UNKNOWN")
+    snap["st_status_source"] = snap["st_status_source"].fillna("UNKNOWN")
+    snap["share_source"] = snap["share_source"].fillna("TOTAL_SHARE_UNKNOWN")
+    snap["total_share"] = pd.to_numeric(snap["total_share"], errors="coerce")
+    snap["historical_market_cap"] = pd.to_numeric(snap["close"], errors="coerce") * snap["total_share"]
+    snap["market_cap_method"] = MARKET_CAP_METHOD
+    return snap
+
+
 def build_base_universe(snapshot: pd.DataFrame, metrics: pd.DataFrame, screen_date: pd.Timestamp, effective_date: pd.Timestamp) -> pd.DataFrame:
     screen = snapshot.copy()
     screen["code"] = screen["code"].astype(str).str.zfill(6)
-    screen = screen[screen["code"].map(is_main_board)].merge(metrics, on="code", how="left")
-    if "historical_st_status" not in screen.columns:
-        screen["historical_st_status"] = "UNKNOWN"
-        screen["st_status_source"] = "UNKNOWN"
-    if "st_status_source" not in screen.columns:
-        screen["st_status_source"] = "UNKNOWN"
+    if "listing_days" not in screen.columns:
+        screen = screen[screen["code"].map(is_main_board)].merge(metrics, on="code", how="left")
+    if "historical_market_cap" not in screen.columns:
+        if "total_market_cap" in screen.columns:
+            screen["historical_market_cap"] = screen["total_market_cap"]
+        else:
+            screen["historical_market_cap"] = pd.to_numeric(screen["close"], errors="coerce") * pd.to_numeric(screen.get("total_share"), errors="coerce")
+    for col, default in [("name", ""), ("name_source", "CODE_FALLBACK"), ("total_share", float("nan")), ("historical_st_status", "UNKNOWN"), ("st_status_source", "UNKNOWN"), ("share_pub_date", ""), ("share_stat_date", ""), ("market_cap_method", MARKET_CAP_METHOD)]:
+        if col not in screen.columns:
+            screen[col] = default
+    screen["name"] = screen["name"].where(screen["name"].astype(str).str.len() > 0, screen["code"])
 
     reasons = []
     for row in screen.itertuples(index=False):
         item_reasons = []
         if not (MIN_PRICE <= row.close <= MAX_PRICE):
             item_reasons.append("收盘价不在5-40元")
-        if not (MIN_MARKET_CAP <= row.total_market_cap <= MAX_MARKET_CAP):
+        if pd.isna(row.historical_market_cap):
+            item_reasons.append("历史总股本未知，无法计算历史总市值")
+        elif not (MIN_MARKET_CAP <= row.historical_market_cap <= MAX_MARKET_CAP):
             item_reasons.append("历史总市值不在20-100亿元")
         if pd.isna(row.listing_days) or row.listing_days < MIN_LISTING_DAYS:
             item_reasons.append("截至screen_date历史不足120个交易日")
         if pd.isna(row.avg_amount_20) or row.avg_amount_20 <= MIN_AVG_AMOUNT_20:
             item_reasons.append("20日平均成交额不足5000万")
-        if getattr(row, "historical_st_status", "UNKNOWN") == "ST":
-            item_reasons.append("screen_date历史ST状态")
+        historical_st_status = getattr(
+            row,
+            "historical_st_status",
+            "UNKNOWN",
+        )
+
+        if historical_st_status == "ST":
+            item_reasons.append(
+                "screen_date历史ST状态"
+            )
+        elif historical_st_status != "NON_ST":
+            item_reasons.append(
+                "screen_date历史ST状态未知"
+            )
         reasons.append(";".join(item_reasons))
 
     screen["screen_date"] = yyyymmdd(screen_date)
     screen["effective_date"] = yyyymmdd(effective_date)
-    screen["historical_market_cap"] = screen["total_market_cap"]
     screen["exclude_reason"] = reasons
     screen["passed"] = screen["exclude_reason"] == ""
-    cols = ["screen_date", "effective_date", "code", "name", "close", "historical_market_cap", "listing_days", "avg_amount_20", "historical_st_status", "st_status_source", "passed", "exclude_reason"]
+    cols = ["screen_date", "effective_date", "code", "name", "name_source", "close", "total_share", "share_pub_date", "share_stat_date", "historical_market_cap", "market_cap_method", "listing_days", "avg_amount_20", "historical_st_status", "st_status_source", "passed", "exclude_reason"]
     return screen[cols].sort_values(["passed", "code"], ascending=[False, True]).reset_index(drop=True)
-
 
 def build_popularity_ranking(base: pd.DataFrame, metrics: pd.DataFrame) -> pd.DataFrame:
     ranking = base[base["passed"]][["code", "name", "historical_market_cap"]].merge(metrics, on="code", how="inner")
@@ -179,36 +229,46 @@ def print_probe(provider: TushareBatchProvider) -> None:
     screen_date, effective_date = resolve_month_dates_from_calendar(trade_dates)
     history_dates = required_history_dates(trade_dates, screen_date, 2)[:-1]
     diagnostics = CacheDiagnostics(provider.name)
+    bdiag = BaoStockDiagnostics()
     print(f"screen_date: {yyyymmdd(screen_date)}")
     print(f"effective_date: {yyyymmdd(effective_date)}")
     try:
         for date in history_dates:
             df = load_cached_or_fetch_market_daily(provider, date, MARKET_DAILY_CACHE_DIR, diagnostics)
             _print_probe_frame(provider.name, date, "daily", df)
-        snapshot = load_cached_or_fetch_market_snapshot(provider, yyyymmdd(screen_date), MARKET_SNAPSHOT_CACHE_DIR, diagnostics)
-        _print_probe_frame(provider.name, yyyymmdd(screen_date), "snapshot", snapshot)
-        save_diagnostics(
-            diagnostics,
-            screen_date=yyyymmdd(screen_date),
-            effective_date=yyyymmdd(effective_date),
-            mode="probe",
-            probe_daily_dates=",".join(history_dates),
-            probe_snapshot_date=yyyymmdd(screen_date),
-            snapshot_rows=len(snapshot),
-            snapshot_unique_codes=snapshot["code"].nunique() if "code" in snapshot else 0,
-        )
-    except Exception:
-        save_diagnostics(
-            diagnostics,
-            screen_date=yyyymmdd(screen_date),
-            effective_date=yyyymmdd(effective_date),
-            mode="probe",
-            probe_daily_dates=",".join(history_dates),
-            probe_snapshot_date=yyyymmdd(screen_date),
-            snapshot_rows=0,
-            snapshot_unique_codes=0,
-        )
+        fixed = ["600237", "002559", "002962", "000751", "600520"]
+        enriched = load_or_fetch_enrichment(fixed, yyyymmdd(screen_date), BAOSTOCK_ENRICHMENT_CACHE_DIR, diagnostics=bdiag)
+        if bdiag.name_map_failed:
+            print("BaoStock名称映射失败，使用 CODE_FALLBACK，不影响固定5只股票 ST/totalShare probe。")
+        else:
+            print(f"BaoStock名称映射行数: {bdiag.name_map_rows}")
+            print(f"BaoStock名称映射code去重数: {bdiag.name_map_unique_codes}")
+            print(f"BaoStock名称非空数量: {bdiag.name_map_non_empty_names}")
+        print("BaoStock固定5只链路汇总:")
+        print(enriched[["code", "total_share", "share_pub_date", "share_stat_date", "historical_st_status"]].to_string(index=False))
+        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="probe", data_source_daily=provider.name, data_source_enrichment="baostock", probe_daily_dates=",".join(history_dates), baostock_requested_count=bdiag.requested_count, baostock_cache_hit_count=bdiag.cache_hit_count, baostock_success_count=bdiag.success_count, baostock_failed_count=bdiag.failed_count, name_map_rows=bdiag.name_map_rows, name_map_unique_codes=bdiag.name_map_unique_codes, name_map_non_empty_names=bdiag.name_map_non_empty_names, messages=" | ".join(diagnostics.messages + bdiag.messages))
+    except Exception as exc:
+        diagnostics.messages.append(str(exc))
+        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="probe", data_source_daily=provider.name, data_source_enrichment="baostock", probe_daily_dates=",".join(history_dates), baostock_requested_count=bdiag.requested_count, baostock_cache_hit_count=bdiag.cache_hit_count, baostock_success_count=bdiag.success_count, baostock_failed_count=bdiag.failed_count, name_map_rows=bdiag.name_map_rows, name_map_unique_codes=bdiag.name_map_unique_codes, name_map_non_empty_names=bdiag.name_map_non_empty_names, messages=" | ".join(diagnostics.messages + bdiag.messages))
         raise
+
+def _diag_counts(base: pd.DataFrame, prefilter: pd.DataFrame, enrich: pd.DataFrame, bdiag: BaoStockDiagnostics) -> dict:
+    st = enrich.get("historical_st_status", pd.Series(dtype=object)).value_counts(dropna=False)
+    return {
+        "prefilter_candidate_count": len(prefilter),
+        "baostock_requested_count": bdiag.requested_count,
+        "baostock_cache_hit_count": bdiag.cache_hit_count,
+        "baostock_success_count": bdiag.success_count,
+        "baostock_failed_count": bdiag.failed_count,
+        "total_share_known_count": int(pd.to_numeric(enrich.get("total_share", pd.Series(dtype=float)), errors="coerce").notna().sum()),
+        "total_share_unknown_count": int(pd.to_numeric(enrich.get("total_share", pd.Series(dtype=float)), errors="coerce").isna().sum()),
+        "st_count": int(st.get("ST", 0)),
+        "non_st_count": int(st.get("NON_ST", 0)),
+        "unknown_st_count": int(st.get("UNKNOWN", 0)),
+        "name_known_count": int((enrich.get("name_source", pd.Series(dtype=object)) != "CODE_FALLBACK").sum()) if not enrich.empty else 0,
+        "name_fallback_count": int((enrich.get("name_source", pd.Series(dtype=object)) == "CODE_FALLBACK").sum()) if not enrich.empty else 0,
+        "base_passed": int(base["passed"].sum()) if not base.empty and "passed" in base else 0,
+    }
 
 
 def run_full(provider: TushareBatchProvider) -> None:
@@ -216,55 +276,39 @@ def run_full(provider: TushareBatchProvider) -> None:
     screen_date, effective_date = resolve_month_dates_from_calendar(trade_dates)
     needed_dates = required_history_dates(trade_dates, screen_date)
     diagnostics = CacheDiagnostics(provider.name)
+    bdiag = BaoStockDiagnostics()
     base = ranking = pool = pd.DataFrame()
-    snapshot = pd.DataFrame()
+    prefilter = enrich = pd.DataFrame()
     try:
         long_df = load_many_market_daily(provider, needed_dates, MARKET_DAILY_CACHE_DIR, diagnostics)
-        snapshot = load_cached_or_fetch_market_snapshot(provider, yyyymmdd(screen_date), MARKET_SNAPSHOT_CACHE_DIR, diagnostics)
         metrics = add_history_metrics(long_df, screen_date)
+        screen_daily = screen_daily_rows(long_df, screen_date)
+        prefilter = build_prefilter_candidates(screen_daily, metrics)
+        enrich = load_or_fetch_enrichment(prefilter["code"].tolist(), yyyymmdd(screen_date), BAOSTOCK_ENRICHMENT_CACHE_DIR, diagnostics=bdiag)
+        snapshot = build_enriched_snapshot(prefilter, enrich)
         base = build_base_universe(snapshot, metrics, screen_date, effective_date)
         ranking = build_popularity_ranking(base, metrics)
         pool = ranking.head(50).copy()
 
         RESULT_DIR.mkdir(parents=True, exist_ok=True)
+        prefilter.to_csv(RESULT_DIR / "prefilter_candidates.csv", index=False, encoding="utf-8-sig")
         base.to_csv(RESULT_DIR / "base_universe.csv", index=False, encoding="utf-8-sig")
         ranking.to_csv(RESULT_DIR / "popularity_ranking.csv", index=False, encoding="utf-8-sig")
         pool.to_csv(RESULT_DIR / "monthly_pool.csv", index=False, encoding="utf-8-sig")
-        save_diagnostics(
-            diagnostics,
-            screen_date=yyyymmdd(screen_date),
-            effective_date=yyyymmdd(effective_date),
-            snapshot_rows=len(snapshot),
-            snapshot_unique_codes=snapshot["code"].nunique() if "code" in snapshot else 0,
-            base_passed=int(base["passed"].sum()) if not base.empty else 0,
-            final_pool_count=len(pool),
-        )
-    except Exception:
-        save_diagnostics(
-            diagnostics,
-            screen_date=yyyymmdd(screen_date),
-            effective_date=yyyymmdd(effective_date),
-            snapshot_rows=len(snapshot),
-            snapshot_unique_codes=snapshot["code"].nunique() if "code" in snapshot else 0,
-            base_passed=int(base["passed"].sum()) if not base.empty and "passed" in base else 0,
-            final_pool_count=len(pool),
-        )
+        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="full", data_source_daily=provider.name, data_source_enrichment="baostock", final_pool_count=len(pool), messages=" | ".join(diagnostics.messages + bdiag.messages), **_diag_counts(base, prefilter, enrich, bdiag))
+    except Exception as exc:
+        diagnostics.messages.append(str(exc))
+        save_diagnostics(diagnostics, screen_date=yyyymmdd(screen_date), effective_date=yyyymmdd(effective_date), mode="full", data_source_daily=provider.name, data_source_enrichment="baostock", final_pool_count=len(pool), messages=" | ".join(diagnostics.messages + bdiag.messages), **_diag_counts(base, prefilter, enrich, bdiag))
         raise
 
     print(f"目标月份: {TARGET_MONTH}")
     print(f"screen_date: {yyyymmdd(screen_date)}")
     print(f"effective_date: {yyyymmdd(effective_date)}")
-    print(f"数据源: {provider.name}")
+    print(f"数据源: {provider.name} + baostock")
     print(f"需要的交易日数量: {len(needed_dates)}")
-    print(f"成功日期数量: {len(set(diagnostics.successful_trade_dates))}")
-    print(f"失败日期数量: {len(set(diagnostics.failed_trade_dates))}")
-    print(f"缓存命中数量: {len(set(diagnostics.cache_hit_dates))}")
-    print(f"新下载数量: {len(set(diagnostics.downloaded_dates))}")
-    print(f"screen_date 全市场股票数量: {snapshot['code'].nunique()}")
+    print(f"预筛候选数量: {len(prefilter)}")
     print(f"基础池通过数量: {int(base['passed'].sum())}")
-    print(f"人气排名股票数量: {len(ranking)}")
     print(f"最终 Top 50 数量: {len(pool)}")
-    print("Top 10:")
     cols = ["rank", "code", "name", "historical_market_cap", "avg_amount_20", "heat_ratio", "active_days_20", "abnormal_attention_count_20", "popularity_score"]
     print("无" if pool.empty else pool[cols].head(10).to_string(index=False))
 
