@@ -8,6 +8,16 @@ from typing import Iterable
 
 import pandas as pd
 
+from baostock_raw_cache import (
+    BaoStockRawCache,
+    has_profit_quarter,
+    has_st_year,
+    load_profit_quarter,
+    lookup_st_raw,
+    store_profit_quarter,
+    store_st_year,
+)
+
 SHARE_SOURCE = "BAOSTOCK_QUERY_PROFIT_DATA"
 SHARE_UNKNOWN = "TOTAL_SHARE_UNKNOWN"
 ST_SOURCE = "BAOSTOCK_ISST_SCREEN_DATE"
@@ -103,9 +113,15 @@ def select_latest_published_total_share(records: pd.DataFrame, screen_date: str 
 class BaoStockScreenProvider:
     name = "baostock_screen_enrichment"
 
-    def __init__(self, retry: int = 2, request_interval: float = 0.05):
+    def __init__(
+        self,
+        retry: int = 2,
+        request_interval: float = 0.05,
+        raw_cache: BaoStockRawCache | None = None,
+    ):
         self.retry = retry
         self.request_interval = request_interval
+        self.raw_cache = raw_cache
         self.bs = None
 
     def __enter__(self):
@@ -155,14 +171,31 @@ class BaoStockScreenProvider:
         out["code"] = out["code"].astype(str).str[-6:].str.zfill(6)
         return out.drop_duplicates("code")
 
-    def fetch_one(self, code: str, screen_date: str, name_map: dict[str, str] | None = None) -> dict:
+    def _fetch_one_without_raw_cache(
+        self,
+        code: str,
+        screen_date: str,
+        name_map: dict[str, str] | None = None,
+    ) -> dict:
         bs_code = to_baostock_code(code)
         date_dash = pd.to_datetime(screen_date).strftime("%Y-%m-%d")
-        st_df = self._call(self.bs.query_history_k_data_plus, bs_code, "date,code,close,isST", start_date=date_dash, end_date=date_dash, frequency="d", adjustflag="3")
-        st = normalize_st_status(st_df.iloc[0].get("isST") if not st_df.empty else None)
-        # Query reporting periods from newest to oldest.
-        # Once a quarter has a valid totalShare published by screen_date,
-        # older reporting periods cannot outrank it under the point-in-time rule.
+
+        st_df = self._call(
+            self.bs.query_history_k_data_plus,
+            bs_code,
+            "date,code,close,isST",
+            start_date=date_dash,
+            end_date=date_dash,
+            frequency="d",
+            adjustflag="3",
+        )
+
+        st = normalize_st_status(
+            st_df.iloc[0].get("isST")
+            if not st_df.empty
+            else None
+        )
+
         share = select_latest_published_total_share(
             pd.DataFrame(),
             screen_date,
@@ -176,25 +209,237 @@ class BaoStockScreenProvider:
                 quarter=q,
             )
 
-            candidate_share = select_latest_published_total_share(
-                quarter_df,
-                screen_date,
+            candidate_share = (
+                select_latest_published_total_share(
+                    quarter_df,
+                    screen_date,
+                )
             )
 
-            if pd.notna(candidate_share.get("total_share")):
+            if pd.notna(
+                candidate_share.get("total_share")
+            ):
                 share = candidate_share
                 break
-        name = (name_map or {}).get(str(code).zfill(6), "")
-        fetch_status = FETCH_SUCCESS if pd.notna(share.get("total_share")) else FETCH_DATA_UNKNOWN
+
+        name = (
+            name_map or {}
+        ).get(
+            str(code).zfill(6),
+            "",
+        )
+
+        fetch_status = (
+            FETCH_SUCCESS
+            if pd.notna(share.get("total_share"))
+            else FETCH_DATA_UNKNOWN
+        )
+
         return {
             "code": str(code).zfill(6),
-            "name": name or str(code).zfill(6),
-            "name_source": "BAOSTOCK_QUERY_ALL_STOCK" if name else "CODE_FALLBACK",
+            "name": (
+                name
+                or str(code).zfill(6)
+            ),
+            "name_source": (
+                "BAOSTOCK_QUERY_ALL_STOCK"
+                if name
+                else "CODE_FALLBACK"
+            ),
             "historical_st_status": st,
-            "st_status_source": ST_SOURCE if st != "UNKNOWN" else "UNKNOWN",
+            "st_status_source": (
+                ST_SOURCE
+                if st != "UNKNOWN"
+                else "UNKNOWN"
+            ),
             **share,
             "fetch_status": fetch_status,
         }
+
+
+    def _fetch_one_with_raw_cache(
+        self,
+        code: str,
+        screen_date: str,
+        name_map: dict[str, str] | None = None,
+    ) -> dict:
+        if self.raw_cache is None:
+            raise RuntimeError(
+                "raw cache is not configured"
+            )
+
+        normalized_code = str(code).zfill(6)
+        bs_code = to_baostock_code(normalized_code)
+
+        screen_dt = pd.to_datetime(screen_date)
+        screen_year = int(screen_dt.year)
+
+        bundle = self.raw_cache.load(
+            normalized_code
+        )
+
+        dirty = False
+
+        try:
+            # ==========================================
+            # ST raw cache: one successful range query
+            # per stock per calendar year.
+            # ==========================================
+
+            if not has_st_year(
+                bundle,
+                screen_year,
+            ):
+                st_df = self._call(
+                    self.bs.query_history_k_data_plus,
+                    bs_code,
+                    "date,code,isST",
+                    start_date=f"{screen_year}-01-01",
+                    end_date=f"{screen_year}-12-31",
+                    frequency="d",
+                    adjustflag="3",
+                )
+
+                store_st_year(
+                    bundle,
+                    screen_year,
+                    st_df,
+                )
+
+                dirty = True
+
+            st_raw = lookup_st_raw(
+                bundle,
+                screen_date,
+            )
+
+            st = normalize_st_status(
+                st_raw
+            )
+
+
+            # ==========================================
+            # totalShare raw cache:
+            # reuse successful quarter queries across
+            # all monthly screen dates.
+            # ==========================================
+
+            share = select_latest_published_total_share(
+                pd.DataFrame(),
+                screen_date,
+            )
+
+            for year, quarter in quarter_cursor(
+                screen_date
+            ):
+                if has_profit_quarter(
+                    bundle,
+                    year,
+                    quarter,
+                ):
+                    quarter_df = load_profit_quarter(
+                        bundle,
+                        year,
+                        quarter,
+                    )
+
+                else:
+                    quarter_df = self._call(
+                        self.bs.query_profit_data,
+                        code=bs_code,
+                        year=year,
+                        quarter=quarter,
+                    )
+
+                    store_profit_quarter(
+                        bundle,
+                        year,
+                        quarter,
+                        quarter_df,
+                    )
+
+                    dirty = True
+
+                candidate_share = (
+                    select_latest_published_total_share(
+                        quarter_df,
+                        screen_date,
+                    )
+                )
+
+                if pd.notna(
+                    candidate_share.get(
+                        "total_share"
+                    )
+                ):
+                    share = candidate_share
+                    break
+
+
+            name = (
+                name_map or {}
+            ).get(
+                normalized_code,
+                "",
+            )
+
+            fetch_status = (
+                FETCH_SUCCESS
+                if pd.notna(
+                    share.get("total_share")
+                )
+                else FETCH_DATA_UNKNOWN
+            )
+
+            return {
+                "code": normalized_code,
+                "name": (
+                    name
+                    or normalized_code
+                ),
+                "name_source": (
+                    "BAOSTOCK_QUERY_ALL_STOCK"
+                    if name
+                    else "CODE_FALLBACK"
+                ),
+                "historical_st_status": st,
+                "st_status_source": (
+                    ST_SOURCE
+                    if st != "UNKNOWN"
+                    else "UNKNOWN"
+                ),
+                **share,
+                "fetch_status": fetch_status,
+            }
+
+        finally:
+            # Preserve partial successful network work
+            # even if a later request for this stock fails.
+            if dirty:
+                self.raw_cache.save(
+                    normalized_code,
+                    bundle,
+                )
+
+
+    def fetch_one(
+        self,
+        code: str,
+        screen_date: str,
+        name_map: dict[str, str] | None = None,
+    ) -> dict:
+        if self.raw_cache is None:
+            return self._fetch_one_without_raw_cache(
+                code,
+                screen_date,
+                name_map,
+            )
+
+        return self._fetch_one_with_raw_cache(
+            code,
+            screen_date,
+            name_map,
+        )
 
 
 def load_or_fetch_enrichment(candidates: Iterable[str], screen_date: str, cache_dir: Path, provider: BaoStockScreenProvider | None = None, diagnostics: BaoStockDiagnostics | None = None) -> pd.DataFrame:
@@ -221,7 +466,11 @@ def load_or_fetch_enrichment(candidates: Iterable[str], screen_date: str, cache_
     if not todo:
         return existing[existing["code"].isin(wanted)][cols]
     own = provider is None
-    provider = provider or BaoStockScreenProvider()
+    provider = provider or BaoStockScreenProvider(
+        raw_cache=BaoStockRawCache(
+            cache_dir.parent / "baostock_raw_cache"
+        )
+    )
     ctx = provider if not own else provider.__enter__()
     try:
         try:

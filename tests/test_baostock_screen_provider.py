@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from baostock_raw_cache import BaoStockRawCache
+
 from baostock_screen_provider import (
     BaoStockDiagnostics,
     FETCH_DATA_UNKNOWN,
@@ -255,6 +257,194 @@ class BaoStockScreenProviderTests(unittest.TestCase):
             result["fetch_status"],
             FETCH_SUCCESS,
         )
+
+    def test_raw_cache_reuses_st_year_and_profit_quarters_across_months(self):
+        class FakeBS:
+            def query_history_k_data_plus(
+                self,
+                *args,
+                **kwargs,
+            ):
+                pass
+
+            def query_profit_data(
+                self,
+                *args,
+                **kwargs,
+            ):
+                pass
+
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_cache = BaoStockRawCache(
+                Path(tmp)
+            )
+
+            provider = BaoStockScreenProvider(
+                raw_cache=raw_cache
+            )
+
+            provider.bs = FakeBS()
+
+            calls = {
+                "st": 0,
+                "profit": [],
+            }
+
+
+            def fake_call(
+                func,
+                *args,
+                **kwargs,
+            ):
+                if (
+                    func.__name__
+                    == "query_history_k_data_plus"
+                ):
+                    calls["st"] += 1
+
+                    self.assertEqual(
+                        kwargs["start_date"],
+                        "2023-01-01",
+                    )
+
+                    self.assertEqual(
+                        kwargs["end_date"],
+                        "2023-12-31",
+                    )
+
+                    return pd.DataFrame({
+                        "date": [
+                            "2023-01-03",
+                            "2023-02-01",
+                        ],
+                        "code": [
+                            "sz.001270",
+                            "sz.001270",
+                        ],
+                        "isST": [
+                            "0",
+                            "0",
+                        ],
+                    })
+
+
+                if (
+                    func.__name__
+                    == "query_profit_data"
+                ):
+                    year = kwargs["year"]
+                    quarter = kwargs["quarter"]
+
+                    calls["profit"].append(
+                        (year, quarter)
+                    )
+
+                    records = {
+                        (2023, 1): {
+                            "pubDate":
+                                "2023-04-27",
+                            "statDate":
+                                "2023-03-31",
+                            "totalShare":
+                                "111812946.00",
+                        },
+                        (2022, 4): {
+                            "pubDate":
+                                "2023-03-29",
+                            "statDate":
+                                "2022-12-31",
+                            "totalShare":
+                                "111812946.00",
+                        },
+                        (2022, 3): {
+                            "pubDate":
+                                "2022-10-29",
+                            "statDate":
+                                "2022-09-30",
+                            "totalShare":
+                                "111812946.00",
+                        },
+                    }
+
+                    row = records.get(
+                        (year, quarter)
+                    )
+
+                    if row is None:
+                        return pd.DataFrame()
+
+                    return pd.DataFrame([
+                        row
+                    ])
+
+
+                raise AssertionError(
+                    f"unexpected function: "
+                    f"{func.__name__}"
+                )
+
+
+            provider._call = fake_call
+
+
+            first = provider.fetch_one(
+                code="001270",
+                screen_date="20230103",
+                name_map={},
+            )
+
+            second = provider.fetch_one(
+                code="001270",
+                screen_date="20230201",
+                name_map={},
+            )
+
+
+            self.assertEqual(
+                calls["st"],
+                1,
+            )
+
+            self.assertEqual(
+                calls["profit"],
+                [
+                    (2023, 1),
+                    (2022, 4),
+                    (2022, 3),
+                ],
+            )
+
+            self.assertEqual(
+                first[
+                    "historical_st_status"
+                ],
+                "NON_ST",
+            )
+
+            self.assertEqual(
+                second[
+                    "historical_st_status"
+                ],
+                "NON_ST",
+            )
+
+            self.assertEqual(
+                first["total_share"],
+                111812946.0,
+            )
+
+            self.assertEqual(
+                second["total_share"],
+                111812946.0,
+            )
+
+            self.assertTrue(
+                raw_cache
+                .path_for("001270")
+                .exists()
+            )
+
 
     def test_st_mapping(self):
         self.assertEqual(normalize_st_status("1"), "ST")
