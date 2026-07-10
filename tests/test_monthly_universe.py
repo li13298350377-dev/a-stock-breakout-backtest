@@ -257,7 +257,15 @@ class MonthlyUniverseTests(unittest.TestCase):
                 patch("monthly_universe.load_or_fetch_enrichment", side_effect=fake_enrichment):
             run_full(provider)
             diagnostics = pd.read_csv(Path(tmp) / "results" / "data_diagnostics.csv")
+            prefilter_output = pd.read_csv(
+                Path(tmp) / "results" / "prefilter_candidates.csv",
+                dtype={"code": str},
+            )
 
+        self.assertEqual(
+            prefilter_output["code"].tolist(),
+            ["000001"],
+        )
         self.assertEqual(provider.daily_basic_calls, 0)
         self.assertEqual(provider.stk_premarket_calls, 0)
         self.assertEqual(captured["codes"], ["000001"])

@@ -291,6 +291,7 @@ def run_full(provider: TushareBatchProvider) -> None:
         pool = ranking.head(50).copy()
 
         RESULT_DIR.mkdir(parents=True, exist_ok=True)
+        prefilter.to_csv(RESULT_DIR / "prefilter_candidates.csv", index=False, encoding="utf-8-sig")
         base.to_csv(RESULT_DIR / "base_universe.csv", index=False, encoding="utf-8-sig")
         ranking.to_csv(RESULT_DIR / "popularity_ranking.csv", index=False, encoding="utf-8-sig")
         pool.to_csv(RESULT_DIR / "monthly_pool.csv", index=False, encoding="utf-8-sig")
