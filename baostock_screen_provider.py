@@ -62,12 +62,36 @@ def select_latest_published_total_share(records: pd.DataFrame, screen_date: str 
         return {"share_pub_date": "", "share_stat_date": "", "total_share": float("nan"), "share_source": SHARE_UNKNOWN}
     df = records.copy()
     df["pubDate_dt"] = pd.to_datetime(df.get("pubDate"), errors="coerce")
+    df["statDate_dt"] = pd.to_datetime(df.get("statDate"), errors="coerce")
     cutoff = pd.to_datetime(screen_date)
     df["total_share_num"] = pd.to_numeric(df.get("totalShare"), errors="coerce")
-    valid = df[(df["pubDate_dt"].notna()) & (df["pubDate_dt"] <= cutoff) & (df["total_share_num"] > 0)]
+
+    valid = df[
+        (df["pubDate_dt"].notna())
+        & (df["pubDate_dt"] <= cutoff)
+        & (df["total_share_num"] > 0)
+    ].copy()
+
     if valid.empty:
-        return {"share_pub_date": "", "share_stat_date": "", "total_share": float("nan"), "share_source": SHARE_UNKNOWN}
-    row = valid.sort_values("pubDate_dt").iloc[-1]
+        return {
+            "share_pub_date": "",
+            "share_stat_date": "",
+            "total_share": float("nan"),
+            "share_source": SHARE_UNKNOWN,
+        }
+
+    # Point-in-time rule:
+    # 1. pubDate <= screen_date controls data availability;
+    # 2. among available records, choose the latest reporting period statDate;
+    # 3. pubDate is only the tie-breaker for duplicate statDate records.
+    with_stat_date = valid[valid["statDate_dt"].notna()]
+
+    if not with_stat_date.empty:
+        row = with_stat_date.sort_values(
+            ["statDate_dt", "pubDate_dt"]
+        ).iloc[-1]
+    else:
+        row = valid.sort_values("pubDate_dt").iloc[-1]
     return {
         "share_pub_date": str(row.get("pubDate", "")),
         "share_stat_date": str(row.get("statDate", "")),

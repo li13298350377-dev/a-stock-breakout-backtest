@@ -101,6 +101,53 @@ class BaoStockScreenProviderTests(unittest.TestCase):
         self.assertEqual(out["total_share"], 564369565)
         self.assertEqual(out["share_pub_date"], "2022-10-29")
 
+    def test_same_pubdate_prefers_latest_statdate(self):
+        """
+        Regression test based on historical BaoStock records for 001270.
+
+        Multiple reporting periods can share the same pubDate.
+        After enforcing pubDate <= screen_date, the newest statDate
+        must be selected.
+        """
+        records = pd.DataFrame({
+            "pubDate": [
+                "2022-10-29",
+                "2022-08-19",
+                "2022-05-16",
+                "2022-10-29",
+            ],
+            "statDate": [
+                "2022-09-30",
+                "2022-06-30",
+                "2022-03-31",
+                "2021-09-30",
+            ],
+            "totalShare": [
+                111812946,
+                111812946,
+                83859446,
+                83859446,
+            ],
+        })
+
+        out = select_latest_published_total_share(
+            records,
+            "2023-01-03",
+        )
+
+        self.assertEqual(
+            out["share_pub_date"],
+            "2022-10-29",
+        )
+        self.assertEqual(
+            out["share_stat_date"],
+            "2022-09-30",
+        )
+        self.assertEqual(
+            out["total_share"],
+            111812946,
+        )
+
     def test_total_share_unknown(self):
         out = select_latest_published_total_share(pd.DataFrame({"pubDate": ["2023-02-01"], "statDate": ["2022-12-31"], "totalShare": [100]}), "2023-01-03")
         self.assertEqual(out["share_source"], "TOTAL_SHARE_UNKNOWN")
